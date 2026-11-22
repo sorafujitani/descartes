@@ -1,0 +1,44 @@
+{
+  "name": "@descartes/web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "cf dev",
+    "build": "cf build",
+    "storybook": "storybook dev --port 6006 --host 127.0.0.1 --disable-telemetry",
+    "build-storybook": "storybook build --disable-telemetry --output-dir storybook-static",
+    "test:storybook": "vitest run --config vitest.config.ts",
+    "install:browser": "playwright install chromium"
+  },
+  "dependencies": {
+    "@codemirror/commands": "6.11.1",
+    "@codemirror/lang-markdown": "6.5.2",
+    "@codemirror/language": "6.13.1",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.15",
+    "@descartes/shared": "workspace:*",
+    "@lezer/highlight": "^1.2.5",
+    "@ox-content/wasm": "^3.8.3",
+    "@sorafujitani/document-design-system": "https://codeload.github.com/sorafujitani/document-design-system/tar.gz/7993d6b97ce133468735f4b2a83f6a049eafe94a",
+    "dompurify": "^3.4.18",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "2.0.0-rc.3",
+    "@storybook/addon-vitest": "10.6.8",
+    "@storybook/react-vite": "10.6.8",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.3.0",
+    "@vitest/browser-playwright": "5.1.0",
+    "cf": "1.0.0-rc.2",
+    "jsdom": "31.0.1",
+    "miniflare": "5.20261119.0-beta",
+    "playwright": "1.65.1",
+    "storybook": "10.6.8",
+    "vite": "npm:@voidzero-dev/vite-plus-core@8.3.8000",
+    "vite-plus": "1.7.0",
+    "vitest": "5.1.0"
+  }
+}

@@ -1,0 +1,20 @@
+packages:
+  - apps/*
+  - packages/*
+overrides:
+  vite@*: npm:@voidzero-dev/vite-plus-core@8.3.8000
+  vitest@*: 5.1.0
+publicHoistPattern:
+  - oxfmt
+  - oxlint
+allowBuilds:
+  esbuild: true
+  sharp: true
+  workerd: true
+
+minimumReleaseAgeExclude:
+  - "@cloudflare/build-output-utils@1.0.0-rc.3"
+  - "@cloudflare/config@1.0.0-rc.3"
+  - "@cloudflare/runtime-types@0.1.32"
+  - "@cloudflare/vite-plugin@2.0.0-rc.3"
+  - miniflare@5.20261119.0-beta

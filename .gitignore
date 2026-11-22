@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.build/
+.cloudflare/
+.wrangler/
+.dev.vars*
+!.dev.vars.example
+.env*
+.swiftpm/
+storybook-static/
+debug-storybook.log
+__screenshots__/

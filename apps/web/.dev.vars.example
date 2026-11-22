@@ -1,0 +1,4 @@
+GITHUB_REPOSITORY=owner/private-documents
+GITHUB_TOKEN=
+ACCESS_ISSUER=https://your-team.cloudflareaccess.com
+ACCESS_AUD=

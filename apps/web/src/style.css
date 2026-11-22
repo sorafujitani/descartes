@@ -1,0 +1,160 @@
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+header,
+main {
+  max-width: 74rem;
+  margin: auto;
+  padding: 1rem;
+}
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--color-border);
+}
+header b {
+  font-size: 1.5rem;
+}
+small {
+  color: var(--color-text-muted);
+}
+main {
+  display: grid;
+  grid-template-columns: minmax(13rem, 19rem) minmax(0, 1fr);
+  gap: 2rem;
+}
+aside,
+section {
+  min-width: 0;
+}
+.bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+h2 {
+  font-size: 1.1rem;
+  margin: 0 auto 0 0;
+}
+button,
+input,
+textarea {
+  font: inherit;
+  color: var(--color-text);
+  background: var(--color-tag-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 0.4rem;
+  padding: 0.55rem 0.7rem;
+}
+button {
+  cursor: pointer;
+}
+button:hover,
+button[aria-current] {
+  border-color: var(--color-accent);
+}
+button:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+input[type="search"] {
+  width: 100%;
+}
+aside ul,
+dialog ul {
+  list-style: none;
+  padding: 0;
+}
+aside ul {
+  max-height: 60vh;
+  overflow: auto;
+}
+aside li button {
+  text-align: left;
+  width: 100%;
+  overflow-wrap: anywhere;
+}
+article {
+  overflow-wrap: anywhere;
+}
+.search-mode {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+}
+.search-snippet {
+  display: block;
+  margin-top: 0.25rem;
+}
+aside li {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 3rem;
+}
+.sora-prose img {
+  max-width: min(100%, 320px);
+  max-height: 240px;
+}
+.document-editor {
+  min-width: 0;
+}
+.sora-prose li:has(> input[type="checkbox"], > p > input[type="checkbox"]) {
+  list-style: none;
+  min-height: 2.75rem;
+  padding: 0.45rem 0;
+}
+.sora-prose input[type="checkbox"] {
+  width: 1.25rem;
+  height: 1.25rem;
+  margin-right: 0.55rem;
+  accent-color: var(--color-accent);
+  vertical-align: middle;
+}
+.sora-prose li:has(> input[type="checkbox"]:checked, > p > input[type="checkbox"]:checked) {
+  color: var(--color-text-muted);
+  text-decoration: line-through;
+}
+.sheet {
+  zoom: var(--note-zoom, 1);
+}
+dialog {
+  color: var(--color-text);
+  background: var(--color-code-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  max-width: 36rem;
+}
+dialog::backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+dialog kbd {
+  font-family: var(--font-code);
+}
+[role="alert"] {
+  border-left: 3px solid var(--color-accent);
+  padding-left: 0.75rem;
+}
+[role="status"]:not(:empty) {
+  margin-bottom: 0.75rem;
+}
+@media (max-width: 700px) {
+  main {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+  aside ul {
+    max-height: 9rem;
+  }
+  header,
+  main {
+    padding: 0.85rem;
+  }
+}

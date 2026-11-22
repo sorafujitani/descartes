@@ -1,0 +1,10 @@
+{
+  "name": "@descartes/api",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@descartes/shared": "workspace:*",
+    "hono": "4.13.16",
+    "jose": "6.2.18"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "name": "descartes",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --filter @descartes/web dev",
+    "dev:demo": "pnpm --filter @descartes/web exec cf dev --mode demo --host 127.0.0.1",
+    "build": "pnpm --filter @descartes/web build",
+    "build:macos": "sh apps/macos/build.sh",
+    "test:macos": "swift test --package-path apps/macos",
+    "check": "tsc --noEmit && vp check",
+    "fmt": "vp fmt --write .",
+    "test": "vp test run",
+    "bench:search": "DESCARTES_BENCHMARK=1 vp test run tests/github-index.test.ts",
+    "verify:deploy": "node scripts/verify-deployment.mjs",
+    "storybook": "pnpm --filter @descartes/web storybook",
+    "build-storybook": "pnpm --filter @descartes/web build-storybook",
+    "test:storybook": "pnpm --filter @descartes/web test:storybook",
+    "test:production": "pnpm build && node scripts/verify-production-ui.mjs",
+    "gate:deploy": "pnpm check && pnpm test && pnpm build-storybook && pnpm test:storybook && pnpm test:production",
+    "deploy": "pnpm gate:deploy && pnpm --filter @descartes/web exec cf deploy",
+    "deploy:check": "pnpm gate:deploy && pnpm --filter @descartes/web exec cf deploy --dry-run"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "typescript": "7.0.2",
+    "vite-plus": "1.7.0"
+  },
+  "engines": {
+    "node": ">=22.22.2"
+  },
+  "packageManager": "pnpm@12.21.0"
+}
