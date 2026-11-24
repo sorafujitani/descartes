@@ -28,7 +28,7 @@ final class NotebookTests: XCTestCase {
     func settle() async throws {
       for _ in 0..<100 {
         try await Task.sleep(nanoseconds: 20_000_000)
-        if !book.busy { return }
+        if !book.busy && !book.saving { return }
       }
       XCTFail("Timed out")
     }

@@ -21,6 +21,7 @@ export {
   renameTask,
   spliceText,
   toggleTask,
+  todoShortcut,
   toggleTaskAt,
   wrapSelection,
 } from "./edit.ts";
@@ -97,12 +98,24 @@ export function client(
     },
     get: (id: string, signal?: AbortSignal) =>
       request<Document>("docs/" + encodeURIComponent(id), { signal }),
-    save: (markdown: string, base?: Pick<Document, "id" | "sha">) =>
-      request<Document>(base ? "docs/" + encodeURIComponent(base.id) : "docs", {
+    /**
+     * `keepalive` lets a save started while the page is being hidden or closed finish. Browsers
+     * reject keepalive bodies over 64 KiB, so larger documents fall back to an ordinary request.
+     */
+    save(
+      markdown: string,
+      base?: Pick<Document, "id" | "sha">,
+      options: { keepalive?: boolean } = {},
+    ) {
+      const body = JSON.stringify({ markdown, sha: base?.sha });
+      const keepalive = options.keepalive && new TextEncoder().encode(body).length <= 60 * 1024;
+      return request<Document>(base ? "docs/" + encodeURIComponent(base.id) : "docs", {
         method: base ? "PUT" : "POST",
         headers: { "Content-Type": "application/json", "X-Descartes-Write": "1" },
-        body: JSON.stringify({ markdown, sha: base?.sha }),
-      }),
+        body,
+        ...(keepalive ? { keepalive: true } : {}),
+      });
+    },
     attach: (file: File) =>
       request<{ path: string }>("assets", {
         method: "POST",

@@ -7,9 +7,10 @@ export const shortcutHelp = [
   ["⌘E", "編集に戻る / インラインコード"],
   ["⌘F、⌘G / ⌘⇧G", "本文検索、次 / 前の一致"],
   ["⌘⌥[ / ⌘⌥]", "前 / 次の見出し"],
-  ["Return", "リストを続ける。空の項目でもう一度押すと終了"],
+  ["Return", "リストを続ける。空の項目で字下げを戻す / 終了"],
   ["Tab / ⇧Tab", "リストの字下げ / 戻す"],
-  ["⌘Return", "チェックを切り替える"],
+  ["⌘Return", "ToDoにする（選択した複数行も） / チェックを切り替える"],
+  ["[]", "行頭で入力するとToDo（- [ ] ）になる"],
   ["⌘B / ⌘I / ⌘⇧`", "太字 / 斜体 / インラインコード"],
   ["⌘L", "リンクを挿入"],
   ["⌘K", "ショートカット一覧"],
@@ -78,6 +79,8 @@ export function continueList(text: string, caret: number) {
   const { start, line } = lineAt(text, caret);
   const item = listLine(line);
   if (!item || fenced(text, start, line) || caret < start + item.length) return;
+  // An empty nested item moves out one level first; at the top level it ends the list.
+  if (item.length === line.length && item.indent) return indentItem(text, caret, true);
   if (item.length === line.length) return replace(text, start, start + item.length, "", start);
   return replace(text, caret, caret, "\n" + item.next, caret + 1 + item.next.length);
 }
@@ -145,13 +148,121 @@ export function insertTaskAfter(text: string, index: number, label = "") {
 export function spliceText(text: string, start: number, end: number, insert: string) {
   return text.slice(0, start) + insert + text.slice(end);
 }
-export function toggleTask(text: string, caret: number) {
-  const { start, line } = lineAt(text, caret);
-  const item = listLine(line);
-  const box = line.indexOf("[");
-  if (!item || fenced(text, start, line) || box < 0 || !/^\[[ xX]\]/.test(line.slice(box))) return;
-  const at = start + box + 1;
-  return replace(text, at, at + 1, text[at] === " " ? "x" : " ", caret);
+/** A line as ⌘Return sees it: quote/indent prefix, optional list marker and optional checkbox. */
+const taskLinePattern =
+  /^((?:[ \t]*>)*[ \t]*)(?:([-*+]|\d{1,9}[.)])(?=[ \t]|$))?([ \t]*)(\[[ xX]\])?/;
+type TaskLine = { prefix: string; marker?: string; gap: string; box?: string; rest: string };
+function taskLine(line: string): TaskLine | undefined {
+  const match = taskLinePattern.exec(line)!;
+  const [, prefix, marker, gap] = match;
+  const box = marker && gap ? match[4] : undefined;
+  const rest = line.slice((prefix + (marker ?? "") + gap + (box ?? "")).length);
+  // Headings (including the title line) stay headings.
+  const level = /^#*/.exec(rest)![0].length;
+  if (!marker && level >= 1 && level <= 6 && (rest[level] ?? " ") === " ") return;
+  return { prefix, marker, gap, box, rest };
+}
+const taskText = (task: TaskLine) =>
+  task.prefix + (task.marker ?? "") + task.gap + (task.box ?? "") + task.rest;
+/** Length up to the marker gap, or through the checkbox and one following space. */
+const taskPrefix = (task: TaskLine) =>
+  (task.prefix + (task.marker ?? "") + task.gap + (task.box ? "[ ]" : "")).length +
+  (task.box && task.rest.startsWith(" ") ? 1 : 0);
+/**
+ * ⌘Return: turns the line at the caret (or every selected line) into a todo, or toggles its
+ * checkbox when it already is one. Bullets and numbered items keep their marker; plain text gains
+ * "- [ ] ". Headings and fenced code are left alone. Several todos are checked together unless all
+ * of them already are. Mirrors `NoteText.toggleTask` in the Mac app.
+ */
+export function toggleTask(
+  text: string,
+  start: number,
+  end = start,
+): (Span & { text: string }) | undefined {
+  let last = end;
+  if (end > start && text[end - 1] === "\n") last--;
+  const blockStart = text.lastIndexOf("\n", start - 1) + 1;
+  const stop = text.indexOf("\n", last);
+  const blockEnd = stop < 0 ? text.length : stop;
+  const fence = new Fence();
+  if (blockStart > 0)
+    for (const line of text.slice(0, blockStart - 1).split("\n")) fence.consumes(line);
+  const raw = text.slice(blockStart, blockEnd).split("\n");
+  const lines = raw.map((full) => {
+    const line = full.endsWith("\r") ? full.slice(0, -1) : full;
+    const code = fence.consumes(line);
+    const eligible = !code && (raw.length === 1 || /\S/.test(line));
+    return { full, line, task: eligible ? taskLine(line) : undefined };
+  });
+  const targets = lines.flatMap((entry) => (entry.task ? [entry.task] : []));
+  if (!targets.length) return;
+  const toggling = targets.every((task) => task.box);
+  const check = targets.some((task) => task.box === "[ ]");
+  const moves: {
+    line: number;
+    oldPrefix: number;
+    newPrefix: number;
+    before: number;
+    delta: number;
+  }[] = [];
+  let at = blockStart,
+    output = "",
+    shift = 0;
+  for (const [index, { full, line, task }] of lines.entries()) {
+    const ending = full.slice(line.length) + (index < lines.length - 1 ? "\n" : "");
+    let updated: TaskLine | undefined;
+    if (task && toggling && (task.box !== "[ ]") !== check)
+      updated = { ...task, box: check ? "[x]" : "[ ]" };
+    else if (task && !toggling && !task.box)
+      updated = {
+        ...task,
+        marker: task.marker ?? "-",
+        gap: " ",
+        box: "[ ]",
+        rest: /^[ \t]/.test(task.rest) ? task.rest : " " + task.rest,
+      };
+    const next = updated ? taskText(updated) : line;
+    if (updated && task) {
+      const delta = next.length - line.length;
+      moves.push({
+        line: at,
+        oldPrefix: at + (toggling ? 0 : taskPrefix(task)),
+        newPrefix: blockStart + output.length + (toggling ? 0 : taskPrefix(updated)),
+        before: shift,
+        delta,
+      });
+      shift += delta;
+    }
+    output += next + ending;
+    at += full.length + 1;
+  }
+  if (!moves.length) return;
+  const map = (location: number) => {
+    let move: (typeof moves)[number] | undefined;
+    for (const candidate of moves) if (candidate.line <= location) move = candidate;
+    if (!move) return location;
+    return location < move.oldPrefix ? move.newPrefix : location + move.before + move.delta;
+  };
+  const from = map(start);
+  return {
+    text: text.slice(0, blockStart) + output + text.slice(blockEnd),
+    start: from,
+    end: end === start ? from : Math.max(from, map(end)),
+  };
+}
+/**
+ * "[]" (or full-width "［］") typed at the start of a line or bullet becomes "- [ ] ". `caret` is
+ * just after the typed bracket. When nothing separates it from following text, the caller should
+ * absorb one space typed next, so "- [] 牛乳" also gives "- [ ] 牛乳". Mirrors the Mac app.
+ */
+export function todoShortcut(text: string, caret: number) {
+  const start = text.lastIndexOf("\n", caret - 1) + 1;
+  const before = text.slice(start, caret);
+  const match = /^([ \t]*)(?:([-*+])[ \t]+)?(?:\[\]|［］)$/.exec(before);
+  if (!match || fenced(text, start, before)) return;
+  const separated = text[caret] === " " || text[caret] === "\t";
+  const insert = match[1] + (match[2] ?? "-") + (separated ? " [ ]" : " [ ] ");
+  return { from: start, to: caret, insert, absorbSpace: !separated };
 }
 export function wrapSelection(
   text: string,

@@ -1,10 +1,152 @@
 import AppKit
 import SwiftUI
 
+/// Gives every body line the same height and baseline. With Japanese preferred languages AppKit
+/// draws characters such as "[]" with Hiragino; a line mixing it with the system font grows
+/// taller than its paragraph's line height (even with `maximumLineHeight`), so line spacing and
+/// bullet positions varied with the line's content.
+final class UniformLines: NSObject, NSLayoutManagerDelegate {
+  func layoutManager(
+    _ layoutManager: NSLayoutManager,
+    shouldSetLineFragmentRect lineFragmentRect: UnsafeMutablePointer<NSRect>,
+    lineFragmentUsedRect: UnsafeMutablePointer<NSRect>,
+    baselineOffset: UnsafeMutablePointer<CGFloat>, in textContainer: NSTextContainer,
+    forGlyphRange glyphRange: NSRange
+  ) -> Bool {
+    guard let storage = layoutManager.textStorage, glyphRange.length > 0 else { return false }
+    let index = layoutManager.characterIndexForGlyph(at: glyphRange.location)
+    guard index < storage.length,
+      let font = storage.attribute(NoteText.uniformLine, at: index, effectiveRange: nil)
+        as? NSFont,
+      let paragraph = storage.attribute(.paragraphStyle, at: index, effectiveRange: nil)
+        as? NSParagraphStyle, paragraph.minimumLineHeight > 0
+    else { return false }
+    let height = paragraph.minimumLineHeight
+    let used = lineFragmentUsedRect.pointee
+    // Whatever TextKit added beyond the used height is paragraph spacing; keep it.
+    let spacing = max(0, lineFragmentRect.pointee.height - used.height)
+    lineFragmentUsedRect.pointee.size.height = height
+    lineFragmentRect.pointee.size.height = height + spacing
+    baselineOffset.pointee = (height + font.descender).rounded()
+    return true
+  }
+}
+
 /// Decorations use UTF-16 source ranges; the backing storage always contains plain Markdown.
 final class NoteText: NSTextView {
   static let ink = Theme.text
   static let muted = Theme.muted
+  /// Marks body text whose lines use uniform metrics; the value is the body font.
+  static let uniformLine = NSAttributedString.Key("DescartesUniformLine")
+  /// Width reserved for a bullet or checkbox before the item text, at 100% zoom.
+  static let markerWidth: CGFloat = 19
+  /// Set by each styling pass so markers, hit targets and typing follow the zoom level.
+  var markScale: CGFloat = 1
+  var bodyFont = NSFont.systemFont(ofSize: 14)
+  var normalAttributes: [NSAttributedString.Key: Any]?
+  let uniformLines = UniformLines()
+  /// Preview is read-only, but its checkboxes can still be toggled (as on the web).
+  var togglesTasksWhenReadOnly = false
+  /// Typing shortcuts such as "[]" → "- [ ] " (off in Markdown source mode).
+  var autoFormat = true
+  /// After "[]" becomes "- [ ] ", the space typed next would double the separator.
+  var swallowSpaceAt: Int?
+  private var movingBackward = false
+
+  override func insertText(_ insertString: Any, replacementRange: NSRange) {
+    let typed = (insertString as? NSAttributedString)?.string ?? insertString as? String ?? ""
+    let pending = swallowSpaceAt
+    swallowSpaceAt = nil
+    if typed == " ", let pending, selectedRange() == NSRange(location: pending, length: 0),
+      replacementRange.location == NSNotFound || replacementRange == selectedRange()
+    {
+      return
+    }
+    super.insertText(insertString, replacementRange: replacementRange)
+    if autoFormat, typed.hasSuffix("]") || typed.hasSuffix("］") { completeTodoShortcut() }
+  }
+
+  override var typingAttributes: [NSAttributedString.Key: Any] {
+    get { super.typingAttributes }
+    set {
+      // A caret after hidden Markdown would otherwise inherit its 0.1pt clear font and marker
+      // kerning, making IME composition invisible and widely spaced until the line is restyled.
+      let hidden =
+        newValue[Self.atomicMarker] != nil || ((newValue[.font] as? NSFont)?.pointSize ?? 14) < 1
+      if hidden, let normalAttributes {
+        super.typingAttributes = normalAttributes
+      } else {
+        super.typingAttributes = newValue
+      }
+    }
+  }
+  /// The hidden marker strictly surrounding `index`, if any.
+  func atomicRange(around index: Int) -> NSRange? {
+    guard let storage = textStorage, index > 0, index < storage.length else { return nil }
+    var range = NSRange()
+    guard
+      storage.attribute(
+        Self.atomicMarker, at: index - 1, longestEffectiveRange: &range,
+        in: NSRange(location: 0, length: storage.length)) != nil,
+      range.location < index, index < NSMaxRange(range)
+    else { return nil }
+    return range
+  }
+  override func setSelectedRanges(
+    _ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool
+  ) {
+    var ranges = ranges
+    if let pending = swallowSpaceAt,
+      ranges.first?.rangeValue != NSRange(location: pending, length: 0)
+    {
+      swallowSpaceAt = nil
+    }
+    // Hidden marker characters have no visible width. Keep a caret out of them so arrow keys
+    // and clicks never need invisible extra steps or split "- [ ] " while typing.
+    if ranges.count == 1, !hasMarkedText(), ranges[0].rangeValue.length == 0,
+      let marker = atomicRange(around: ranges[0].rangeValue.location)
+    {
+      let location = movingBackward ? marker.location : NSMaxRange(marker)
+      ranges = [NSValue(range: NSRange(location: location, length: 0))]
+    }
+    super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
+  }
+  private func backward(_ move: () -> Void) {
+    movingBackward = true
+    defer { movingBackward = false }
+    move()
+  }
+  override func moveLeft(_ sender: Any?) { backward { super.moveLeft(sender) } }
+  override func moveBackward(_ sender: Any?) { backward { super.moveBackward(sender) } }
+  override func moveWordLeft(_ sender: Any?) { backward { super.moveWordLeft(sender) } }
+  override func moveWordBackward(_ sender: Any?) { backward { super.moveWordBackward(sender) } }
+  /// ⌘← first stops after a bullet/checkbox, like other note editors; a second press reaches
+  /// the true line start.
+  private func smartLineStart(_ move: () -> Void) {
+    let before = selectedRange()
+    backward(move)
+    let after = selectedRange()
+    guard let storage = textStorage, after.length == 0, after.location < storage.length,
+      before.location > after.location
+    else { return }
+    var marker = NSRange()
+    guard
+      storage.attribute(
+        Self.atomicMarker, at: after.location, longestEffectiveRange: &marker,
+        in: NSRange(location: 0, length: storage.length)) != nil,
+      marker.location == after.location, before.location > NSMaxRange(marker)
+    else { return }
+    setSelectedRange(NSRange(location: NSMaxRange(marker), length: 0))
+  }
+  override func moveToBeginningOfLine(_ sender: Any?) {
+    smartLineStart { super.moveToBeginningOfLine(sender) }
+  }
+  override func moveToLeftEndOfLine(_ sender: Any?) {
+    smartLineStart { super.moveToLeftEndOfLine(sender) }
+  }
+  override func moveToBeginningOfParagraph(_ sender: Any?) {
+    smartLineStart { super.moveToBeginningOfParagraph(sender) }
+  }
   override func insertNewline(_ sender: Any?) {
     if !continueList() { super.insertNewline(sender) }
   }
@@ -55,14 +197,33 @@ final class NoteText: NSTextView {
   var codeBlocks: [NSRange] = []
   private(set) var lastDrawnCodeBlockCount = 0
 
-  func box(at index: Int) -> NSRect? {
+  /// The line box for the marker at `index`. TextKit adds paragraph spacing to every line
+  /// fragment except the final paragraph's, so the full fragment's midpoint moved whenever
+  /// Return turned the last line into an earlier one. The used rectangle excludes that spacing.
+  private func markerLine(at index: Int) -> (x: CGFloat, baseline: CGFloat, used: NSRect)? {
     guard let layout = layoutManager, index < (string as NSString).length else { return nil }
     let glyph = layout.glyphIndexForCharacter(at: index)
     let line = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+    let used = layout.lineFragmentUsedRect(forGlyphAt: glyph, effectiveRange: nil)
     let location = layout.location(forGlyphAt: glyph)
-    return NSRect(
-      x: textContainerOrigin.x + line.minX + location.x,
-      y: textContainerOrigin.y + line.midY - 6, width: 12, height: 12)
+    return (
+      textContainerOrigin.x + line.minX + location.x,
+      textContainerOrigin.y + line.minY + location.y,
+      used.offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
+    )
+  }
+  /// Bullets and checkboxes are centred on the body text's cap height above the line's
+  /// baseline, which `UniformLines` keeps identical for empty, Latin and Japanese items.
+  func box(at index: Int) -> NSRect? {
+    guard let (x, baseline, _) = markerLine(at: index) else { return nil }
+    let side = 12 * markScale
+    let center = (baseline - bodyFont.capHeight / 2).rounded()
+    return NSRect(x: x, y: center - side / 2, width: side, height: side)
+  }
+  /// Rules and images fill the line, so they stay centred in its used rectangle.
+  private func block(at index: Int) -> NSRect? {
+    guard let (x, _, used) = markerLine(at: index) else { return nil }
+    return NSRect(x: x, y: used.minY, width: max(1, used.maxX - x), height: used.height)
   }
   private func drawCodeBlocks(in visible: NSRange) {
     lastDrawnCodeBlockCount = 0
@@ -92,57 +253,80 @@ final class NoteText: NSTextView {
         in: container), actualGlyphRange: nil)
     drawCodeBlocks(in: visible)
     super.draw(dirtyRect)
+    let s = markScale
     for decoration in decorations where NSLocationInRange(decoration.at, visible) {
-      guard let rect = box(at: decoration.at) else { continue }
       Self.muted.set()
       switch decoration.mark {
       case .task(let checked):
+        guard let rect = box(at: decoration.at) else { continue }
         let shape = NSBezierPath(
-          roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 3, yRadius: 3)
-        shape.lineWidth = 1.2
+          roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 3 * s, yRadius: 3 * s)
+        shape.lineWidth = 1.2 * s
         shape.stroke()
         if checked {
           let check = NSBezierPath()
-          check.move(to: NSPoint(x: rect.minX + 2, y: rect.midY))
-          check.line(to: NSPoint(x: rect.minX + 5, y: rect.maxY - 3))
-          check.line(to: NSPoint(x: rect.maxX - 2, y: rect.minY + 3))
-          check.lineWidth = 1.4
+          check.move(to: NSPoint(x: rect.minX + 2 * s, y: rect.midY))
+          check.line(to: NSPoint(x: rect.minX + 5 * s, y: rect.maxY - 3 * s))
+          check.line(to: NSPoint(x: rect.maxX - 2 * s, y: rect.minY + 3 * s))
+          check.lineWidth = 1.4 * s
           check.stroke()
         }
       case .image(let image, let height):
-        let available = max(1, bounds.width - textContainerInset.width - rect.minX)
+        guard let line = block(at: decoration.at) else { continue }
+        let available = max(1, bounds.width - textContainerInset.width - line.minX)
         let scale = min(height / image.size.height, available / image.size.width)
         let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
         image.draw(
           in: NSRect(
-            x: rect.minX, y: rect.midY - size.height / 2, width: size.width, height: size.height),
+            x: line.minX, y: line.midY - size.height / 2, width: size.width, height: size.height),
           from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
       case .bullet:
-        NSBezierPath(ovalIn: NSRect(x: rect.minX + 3, y: rect.midY - 2, width: 4, height: 4)).fill()
+        guard let rect = box(at: decoration.at) else { continue }
+        let dot = 4 * s
+        NSBezierPath(
+          ovalIn: NSRect(x: rect.minX + 3 * s, y: rect.midY - dot / 2, width: dot, height: dot)
+        ).fill()
       case .rule:
+        guard let line = block(at: decoration.at) else { continue }
         Self.muted.withAlphaComponent(0.45).setFill()
         NSRect(
-          x: rect.minX, y: rect.midY,
-          width: max(1, bounds.width - textContainerInset.width - rect.minX), height: 1
+          x: line.minX, y: line.midY.rounded(),
+          width: max(1, bounds.width - textContainerInset.width - line.minX), height: 1
         ).fill()
       }
     }
   }
-  override func mouseDown(with event: NSEvent) {
-    let point = convert(event.locationInWindow, from: nil)
+  /// The task whose checkbox (with a small margin) is under `point`.
+  func task(at point: NSPoint) -> (at: Int, checked: Bool)? {
+    guard isEditable || togglesTasksWhenReadOnly, !hasMarkedText() else { return nil }
     let index = characterIndexForInsertion(at: point)
     let raw = string as NSString
     let line = raw.lineRange(for: NSRange(location: min(index, raw.length), length: 0))
-    if isEditable, !hasMarkedText(),
-      let decoration = decorations.first(where: { NSLocationInRange($0.at, line) }),
+    guard let decoration = decorations.first(where: { NSLocationInRange($0.at, line) }),
       case .task(let checked) = decoration.mark, let rect = box(at: decoration.at),
-      rect.insetBy(dx: -3, dy: -3).contains(point)
-    {
-      let range = NSRange(location: decoration.at + 3, length: 1)
-      insertText(checked ? " " : "x", replacementRange: range)
+      rect.insetBy(dx: -4 * markScale, dy: -4 * markScale).contains(point)
+    else { return nil }
+    return (decoration.at, checked)
+  }
+  /// Toggles the box without moving the caret or selection, as ⌘Return does.
+  func toggleBox(at marker: Int, checked: Bool) {
+    let selection = selectedRanges
+    let readOnly = !isEditable
+    if readOnly { isEditable = true }
+    insertText(checked ? " " : "x", replacementRange: NSRange(location: marker + 3, length: 1))
+    selectedRanges = selection
+    if readOnly { isEditable = false }
+  }
+  override func mouseDown(with event: NSEvent) {
+    if let task = task(at: convert(event.locationInWindow, from: nil)) {
+      toggleBox(at: task.at, checked: task.checked)
       return
     }
     super.mouseDown(with: event)
+  }
+  override func mouseMoved(with event: NSEvent) {
+    super.mouseMoved(with: event)
+    if task(at: convert(event.locationInWindow, from: nil)) != nil { NSCursor.pointingHand.set() }
   }
 }
 
@@ -190,6 +374,8 @@ struct Editor: NSViewRepresentable {
     guard let view = scroll.documentView as? NoteText else { return }
     let coord = context.coordinator
     view.isEditable = !book.busy && !book.preview
+    view.autoFormat = !source
+    view.togglesTasksWhenReadOnly = book.preview && !book.busy
     if coord.focusRequest != book.focusRequest {
       coord.focusRequest = book.focusRequest
       DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
@@ -337,6 +523,7 @@ struct Editor: NSViewRepresentable {
     private func styleFence(
       _ range: NSRange, opened: Bool, closed: Bool, in storage: NSTextStorage
     ) {
+      storage.removeAttribute(NoteText.uniformLine, range: range)
       if source {
         storage.addAttribute(
           .font, value: NSFont.monospacedSystemFont(ofSize: 13 * scale, weight: .regular),
@@ -380,12 +567,14 @@ struct Editor: NSViewRepresentable {
       let offset = prose.offset
       let at = prose.at
       let level = content.prefix(while: { $0 == "#" }).count
+      var hanging = false
       if (1...6).contains(level) && content.dropFirst(level).first == " " {
         storage.addAttribute(
           .font,
           value: NSFont.systemFont(ofSize: (level == 1 ? 18 : 15) * scale, weight: .semibold),
           range: range)
         storage.addAttribute(.foregroundColor, value: Theme.heading, range: range)
+        storage.removeAttribute(NoteText.uniformLine, range: range)
         marker(level + 1, nil)
       } else if [
         "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ",
@@ -404,27 +593,32 @@ struct Editor: NSViewRepresentable {
               .strikethroughColor: Theme.muted,
             ], range: NSRange(location: start + 6, length: labelLength))
         }
+        hanging = true
       } else if content == "---" || content == "***" {
         marker(3, .rule)
       } else if content.hasPrefix("- ") || content.hasPrefix("* ") || content.hasPrefix("+ ") {
         marker(2, .bullet)
+        hanging = true
       }
       styleInline(line, at: at, in: storage)
-      if !source && offset > 0 {
+      if !source && (offset > 0 || hanging) {
+        // Wrapped item text lines up after its bullet/checkbox instead of under it.
         let indent = NSMutableParagraphStyle()
         indent.setParagraphStyle(paragraph)
-        indent.firstLineHeadIndent = CGFloat(min(offset, 24)) * 8
-        indent.headIndent = indent.firstLineHeadIndent + 19
+        indent.firstLineHeadIndent = CGFloat(min(offset, 24)) * 8 * scale
+        indent.headIndent = indent.firstLineHeadIndent + NoteText.markerWidth * scale
         storage.addAttribute(.paragraphStyle, value: indent, range: range)
       }
     }
     private func baseStyle() -> (NSParagraphStyle, [NSAttributedString.Key: Any]) {
       let paragraph = NSMutableParagraphStyle()
-      paragraph.minimumLineHeight = 22 * scale
-      paragraph.paragraphSpacing = 3
+      // Whole points keep every line, and the markers centred on them, on the same pixel grid.
+      paragraph.minimumLineHeight = (22 * scale).rounded()
+      paragraph.paragraphSpacing = (3 * scale).rounded()
+      let font = NSFont.systemFont(ofSize: 14 * scale)
       return (paragraph, [
-        .font: NSFont.systemFont(ofSize: 14 * scale), .foregroundColor: NoteText.ink,
-        .paragraphStyle: paragraph,
+        .font: font, .foregroundColor: NoteText.ink, .paragraphStyle: paragraph,
+        NoteText.uniformLine: font,
       ])
     }
     private func prose(in raw: NSString, range: NSRange) -> ProseLine {
@@ -457,7 +651,8 @@ struct Editor: NSViewRepresentable {
           ], range: prefixRange)
         if let mark {
           storage.addAttribute(
-            .kern, value: 19, range: NSRange(location: NSMaxRange(prefixRange) - 1, length: 1))
+            .kern, value: NoteText.markerWidth * scale,
+            range: NSRange(location: NSMaxRange(prefixRange) - 1, length: 1))
           view.decorations.append(.init(at: prose.start, mark: mark))
         }
       }
@@ -472,6 +667,7 @@ struct Editor: NSViewRepresentable {
         let block = NSMutableParagraphStyle()
         block.setParagraphStyle(paragraph)
         block.minimumLineHeight = height + 6
+        storage.removeAttribute(NoteText.uniformLine, range: prose.range)
         storage.addAttribute(.paragraphStyle, value: block, range: prose.range)
         marker(prose.content.utf16.count, .image(image, height))
       } else if record.code {
@@ -491,6 +687,14 @@ struct Editor: NSViewRepresentable {
       cacheValid = true
       pendingEdit = nil
       pendingEditCount = 0
+      view.markScale = scale
+      view.bodyFont = NSFont.systemFont(ofSize: 14 * scale)
+      view.normalAttributes = normal
+      if view.layoutManager?.delegate !== view.uniformLines {
+        view.layoutManager?.delegate = view.uniformLines
+        view.layoutManager?.invalidateLayout(
+          forCharacterRange: NSRange(location: 0, length: styledLength), actualCharacterRange: nil)
+      }
       view.typingAttributes = normal
       view.needsDisplay = true
     }

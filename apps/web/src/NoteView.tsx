@@ -1,6 +1,6 @@
 import { forwardRef, useImperativeHandle, useLayoutEffect, useRef } from "react";
 import { Annotation, Compartment, EditorState } from "@codemirror/state";
-import { imagePath, toggleTask } from "@descartes/shared";
+import { imagePath, todoShortcut, toggleTask } from "@descartes/shared";
 import {
   Decoration,
   EditorView,
@@ -74,6 +74,32 @@ class TaskCheckbox extends WidgetType {
   }
 }
 
+/** Ordinary "-", "*" and "+" items show a dot, as in the Mac app; the Markdown is unchanged. */
+class BulletMark extends WidgetType {
+  eq() {
+    return true;
+  }
+  toDOM() {
+    const dot = document.createElement("span");
+    dot.className = "cm-bullet";
+    dot.setAttribute("aria-hidden", "true");
+    return dot;
+  }
+}
+const bullet = Decoration.replace({ atomic: true, widget: new BulletMark() });
+/** Replace only the changed span, so undo history and other selections stay put. */
+function minimalChange(previous: string, next: string) {
+  let from = 0,
+    end = previous.length,
+    nextEnd = next.length;
+  while (from < end && from < nextEnd && previous[from] === next[from]) from++;
+  while (end > from && nextEnd > from && previous[end - 1] === next[nextEnd - 1]) {
+    end--;
+    nextEnd--;
+  }
+  return { from, to: end, insert: next.slice(from, nextEnd) };
+}
+
 class RepositoryImage extends WidgetType {
   constructor(
     readonly name: string,
@@ -105,7 +131,13 @@ function taskDecorations(view: EditorView): DecorationSet {
       from: visible.from,
       to: visible.to,
       enter(node) {
-        if (node.name === "TaskMarker") {
+        if (node.name === "ListMark") {
+          const mark = view.state.doc.sliceString(node.from, node.to);
+          const after = view.state.doc.sliceString(node.to, node.to + 5);
+          // Task items are drawn by their checkbox; ordered items keep their numbers.
+          if (/^[-*+]$/.test(mark) && /^[ \t]/.test(after) && !/^[ \t]+\[[ xX]\]/.test(after))
+            ranges.push(bullet.range(node.from, node.to));
+        } else if (node.name === "TaskMarker") {
           const line = view.state.doc.lineAt(node.from);
           const prefix = view.state.doc.sliceString(line.from, node.from);
           const list = /^([ \t]*)(?:[-*+]|\d{1,9}[.)])[ \t]+$/.exec(prefix);
@@ -202,14 +234,54 @@ const noteTheme = EditorView.theme({
   "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection": {
     backgroundColor: "color-mix(in srgb, var(--color-accent) 25%, transparent)",
   },
+  // Checkboxes and bullets match the Mac app: a muted outlined box, a dot centred in the same
+  // space, and item text starting at the same position for both.
   ".cm-task-checkbox": {
-    width: "1.1rem",
-    height: "1.1rem",
+    appearance: "none",
+    position: "relative",
+    boxSizing: "border-box",
+    width: "0.9rem",
+    height: "0.9rem",
     padding: "0",
-    margin: "0 0.4rem 0 0",
+    margin: "0 0.45rem 0.15em 0.1rem",
+    border: "1.5px solid var(--color-text-muted)",
+    borderRadius: "0.22rem",
+    backgroundColor: "transparent",
     verticalAlign: "middle",
-    accentColor: "var(--color-accent)",
     cursor: "pointer",
+  },
+  ".cm-task-checkbox:checked::after": {
+    content: '""',
+    position: "absolute",
+    left: "0.24rem",
+    top: "0.06rem",
+    width: "0.22rem",
+    height: "0.45rem",
+    border: "solid var(--color-text-muted)",
+    borderWidth: "0 1.5px 1.5px 0",
+    transform: "rotate(45deg)",
+  },
+  ".cm-task-checkbox:focus-visible": {
+    outline: "2px solid var(--color-accent)",
+    outlineOffset: "2px",
+  },
+  ".cm-bullet": {
+    position: "relative",
+    display: "inline-block",
+    width: "0.9rem",
+    height: "0.9rem",
+    margin: "0 0.45rem 0.15em 0.1rem",
+    verticalAlign: "middle",
+  },
+  ".cm-bullet::before": {
+    content: '""',
+    position: "absolute",
+    left: "calc(50% - 0.15rem)",
+    top: "calc(50% - 0.15rem)",
+    width: "0.3rem",
+    height: "0.3rem",
+    borderRadius: "50%",
+    backgroundColor: "var(--color-text-muted)",
   },
   ".cm-completed-task": { color: "var(--color-text-muted)", textDecoration: "line-through" },
   ".cm-note-image": { maxWidth: "min(100%, 320px)", maxHeight: "240px", verticalAlign: "middle" },
@@ -265,6 +337,8 @@ export const NoteView = forwardRef<
   );
   useLayoutEffect(() => {
     if (!root.current) return;
+    /** After "[]" becomes "- [ ] ", the space typed next would double the separator. */
+    let absorbSpaceAt: number | null = null;
     const view = new EditorView({
       parent: root.current,
       state: EditorState.create({
@@ -282,17 +356,19 @@ export const NoteView = forwardRef<
               key: "Mod-Enter",
               run(view) {
                 if (view.state.readOnly) return true;
-                const next = toggleTask(view.state.doc.toString(), view.state.selection.main.head);
+                const previous = view.state.doc.toString();
+                const { from, to } = view.state.selection.main;
+                const next = toggleTask(previous, from, to);
                 if (next) {
-                  const previous = view.state.doc.toString();
-                  let at = 0;
-                  while (at < previous.length && previous[at] === next.text[at]) at++;
-                  if (at < previous.length)
-                    view.dispatch({
-                      changes: { from: at, to: at + 1, insert: next.text[at] },
-                      annotations: persistTask.of(true),
-                      userEvent: "input.task",
-                    });
+                  // Checking or unchecking saves like a checkbox click; creating a todo is an edit.
+                  const toggled = next.text.length === previous.length;
+                  view.dispatch({
+                    changes: minimalChange(previous, next.text),
+                    selection: { anchor: next.start, head: next.end },
+                    annotations: toggled ? persistTask.of(true) : [],
+                    userEvent: toggled ? "input.task" : "input",
+                    scrollIntoView: true,
+                  });
                 }
                 return true;
               },
@@ -309,12 +385,32 @@ export const NoteView = forwardRef<
                 filter: (_from, _to, value) => Boolean(value.spec.atomic),
               }) ?? Decoration.none,
           ),
+          EditorView.inputHandler.of((view, from, to, insert) => {
+            const absorb = absorbSpaceAt;
+            absorbSpaceAt = null;
+            if (insert === " " && from === to && from === absorb) return true;
+            if (!/[\]］]$/.test(insert) || view.state.readOnly) return false;
+            const doc = view.state.doc.toString();
+            const typed = doc.slice(0, from) + insert + doc.slice(to);
+            const caret = from + insert.length;
+            const todo = todoShortcut(typed, caret);
+            if (!todo) return false;
+            view.dispatch({
+              changes: { from: todo.from, to, insert: todo.insert },
+              selection: { anchor: todo.from + todo.insert.length },
+              userEvent: "input.type",
+            });
+            if (todo.absorbSpace) absorbSpaceAt = todo.from + todo.insert.length;
+            return true;
+          }),
           EditorView.contentAttributes.of({
             "aria-label": "Markdown本文",
             "aria-multiline": "true",
             spellcheck: "false",
           }),
           EditorView.updateListener.of((update) => {
+            if (update.selectionSet && update.state.selection.main.head !== absorbSpaceAt)
+              absorbSpaceAt = null;
             if (
               update.docChanged &&
               !update.transactions.some((transaction) => transaction.annotation(externalChange))

@@ -5,7 +5,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { client, type Document } from "@descartes/shared";
 import { EditorView } from "@codemirror/view";
-import { App } from "./App";
+import { App, autosaveTiming } from "./App";
 import { DocumentList } from "./DocumentList";
 
 vi.mock("./Markdown", () => ({
@@ -318,4 +318,150 @@ test("full-text search debounces input and ignores a stale response even when tr
   });
   assert.match(host.textContent!, /New match/);
   assert.doesNotMatch(host.textContent!, /Stale match/);
+});
+
+function fakeTimers() {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+}
+async function advance(ms: number) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+}
+function recordingApi(
+  respond?: (
+    request: Request,
+    body: { markdown: string; sha?: string },
+  ) => Response | Promise<Response>,
+) {
+  const writes: { request: Request; body: { markdown: string; sha?: string } }[] = [];
+  const api = client("https://app.test", {}, async (url, init) => {
+    const request = new Request(String(url), init);
+    if (request.method === "GET")
+      return Response.json(String(url).includes("?cursor=") ? { items: [], next: null } : saved);
+    const body = await request.clone().json();
+    writes.push({ request, body });
+    return (
+      (await respond?.(request, body)) ??
+      Response.json({
+        ...saved,
+        markdown: body.markdown,
+        sha: String(writes.length + 1).repeat(40),
+      })
+    );
+  });
+  return { api, writes };
+}
+
+test("typing autosaves once after a pause, coalescing every keystroke into one commit", async () => {
+  fakeTimers();
+  const { api, writes } = recordingApi();
+  await mount(createElement(App, { api, initialId: saved.id }));
+  for (const text of ["# Draft\na", "# Draft\nab", "# Draft\nabc"]) {
+    await inputDocument(text);
+    await advance(1_000);
+  }
+  assert.equal(writes.length, 0);
+  assert.match(host.textContent!, /自動保存します/);
+  await advance(autosaveTiming.idle);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].request.method, "PUT");
+  assert.deepEqual(writes[0].body, { markdown: "# Draft\nabc", sha: saved.sha });
+  assert.equal(button("保存").disabled, true);
+  await advance(autosaveTiming.max * 2);
+  assert.equal(writes.length, 1, "a saved note is not written again");
+});
+
+test("continuous typing is still saved at the maximum interval", async () => {
+  fakeTimers();
+  const { api, writes } = recordingApi();
+  await mount(createElement(App, { api, initialId: saved.id }));
+  let body = "# Draft\n";
+  for (let elapsed = 0; elapsed < autosaveTiming.max; elapsed += 1_000) {
+    body += "x";
+    await inputDocument(body);
+    await advance(1_000);
+  }
+  assert.equal(writes.length, 1);
+  assert.ok(writes[0].body.markdown.length > "# Draft\n".length);
+  assert.equal(editor().state.readOnly, false, "autosave never blocks typing");
+});
+
+test("an untitled draft is not autosaved", async () => {
+  fakeTimers();
+  const { api, writes } = recordingApi();
+  await mount(createElement(App, { api, initialId: null }));
+  await click("新規作成");
+  await inputDocument("# \n本文だけ");
+  await advance(autosaveTiming.max * 2);
+  assert.equal(writes.length, 0);
+  assert.match(host.textContent!, /タイトル」を書くと自動保存/);
+});
+
+test("a conflict stops autosave until an explicit save", async () => {
+  fakeTimers();
+  let conflict = true;
+  const { api, writes } = recordingApi(() =>
+    conflict ? Response.json({ error: "保存が競合しました" }, { status: 409 }) : undefined!,
+  );
+  await mount(createElement(App, { api, initialId: saved.id }));
+  await inputDocument("# Draft\nlocal");
+  await advance(autosaveTiming.idle);
+  assert.equal(writes.length, 1);
+  assert.match(host.querySelector('[role="alert"]')!.textContent!, /競合/);
+  await inputDocument("# Draft\nlocal more");
+  await advance(autosaveTiming.max * 2);
+  assert.equal(writes.length, 1, "autosave does not retry a conflict");
+  assert.equal(editor().state.sliceDoc(), "# Draft\nlocal more");
+  assert.match(host.textContent!, /自動保存を停止/);
+  conflict = false;
+  await click("保存");
+  assert.equal(writes.length, 2);
+  assert.equal(host.querySelector('[role="alert"]'), null);
+  await inputDocument("# Draft\nresumed");
+  await advance(autosaveTiming.idle);
+  assert.equal(writes.length, 3, "autosave resumes after a successful save");
+});
+
+test("a failed autosave is retried later", async () => {
+  fakeTimers();
+  let down = true;
+  const { api, writes } = recordingApi(() =>
+    down ? Response.json({ error: "unavailable" }, { status: 503 }) : undefined!,
+  );
+  await mount(createElement(App, { api, initialId: saved.id }));
+  await inputDocument("# Draft\nretry");
+  await advance(autosaveTiming.idle);
+  assert.equal(writes.length, 1);
+  down = false;
+  await advance(autosaveTiming.retry);
+  assert.equal(writes.length, 2);
+  assert.equal(button("保存").disabled, true);
+});
+
+test("switching documents saves first instead of asking to discard", async () => {
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+  const { api, writes } = recordingApi();
+  await mount(createElement(App, { api, initialId: saved.id }));
+  await inputDocument("# Draft\nunsaved");
+  await click("新規作成");
+  assert.equal(confirm.mock.calls.length, 0);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].body.markdown, "# Draft\nunsaved");
+  assert.equal(editor().state.sliceDoc(), "# ");
+  confirm.mockRestore();
+});
+
+test("hiding the page saves immediately with a keepalive request", async () => {
+  const { api, writes } = recordingApi();
+  await mount(createElement(App, { api, initialId: saved.id }));
+  await inputDocument("# Draft\nbackground");
+  const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+  await act(async () => {
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  visibility.mockRestore();
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].request.keepalive, true);
+  assert.equal(writes[0].body.markdown, "# Draft\nbackground");
 });

@@ -10,7 +10,12 @@ struct Document: Codable {
 }
 struct Problem: LocalizedError {
   let message: String
-  init(_ message: String) { self.message = message }
+  /// HTTP status of a rejected request, when there was one (409 means a SHA conflict).
+  let status: Int?
+  init(_ message: String, status: Int? = nil) {
+    self.message = message
+    self.status = status
+  }
   var errorDescription: String? { message }
 }
 
@@ -83,7 +88,7 @@ struct API {
     guard let http = response as? HTTPURLResponse else { throw Problem("Invalid response.") }
     guard (200..<300).contains(http.statusCode) else {
       let reason = (try? JSONDecoder().decode([String: String].self, from: data))?["error"]
-      throw Problem(reason ?? "接続できませんでした (HTTP \(http.statusCode))。")
+      throw Problem(reason ?? "接続できませんでした (HTTP \(http.statusCode))。", status: http.statusCode)
     }
     return try JSONDecoder().decode(T.self, from: data)
   }

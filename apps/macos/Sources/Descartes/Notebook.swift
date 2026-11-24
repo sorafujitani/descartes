@@ -2,7 +2,19 @@ import AppKit
 import SwiftUI
 
 @MainActor final class Notebook: ObservableObject {
-  @Published var text = "# "
+  /// Autosave waits for a pause in typing, but never leaves continuous typing unsaved for longer
+  /// than `limit`. Every save is a Git commit, and GitHub limits content-creating requests (roughly
+  /// 80 per minute and 500 per hour), so keystrokes are coalesced instead of saved one by one.
+  struct Timing {
+    var idle: Duration = .seconds(4)
+    var limit: Duration = .seconds(45)
+    var retry: Duration = .seconds(30)
+  }
+  typealias Store = (_ markdown: String, _ base: Document?) async throws -> Document
+
+  @Published var text = "# " {
+    didSet { if text != oldValue { scheduleAutosave() } }
+  }
   @Published private(set) var base: Document?
   @Published private(set) var revision = 0
   @Published var zoom = min(
@@ -13,32 +25,63 @@ import SwiftUI
   @Published var preview = false
   @Published var source = false
   @Published var focusRequest = 0
+  /// Blocking work (loading, switching documents). Saving never blocks typing.
   @Published var busy = false
+  @Published private(set) var saving = false
+  /// A conflict stops autosave until an explicit save succeeds or another document is opened.
+  @Published private(set) var paused = false
   @Published var picking = false
   @Published var message = ""
   @Published var query = ""
   @Published var items: [Summary] = []
   let demo: Bool
-  init(demo: Bool) { self.demo = demo }
+  var timing = Timing()
+  private let store: Store
+  private var saveTask: Task<Bool, Never>?
+  private var inFlight: String?
+  private var again = false
+  private var autosaveTimer: Task<Void, Never>?
+  private var dirtySince: ContinuousClock.Instant?
+
+  init(demo: Bool, store: Store? = nil) {
+    self.demo = demo
+    self.store = store ?? { try await API(demo: demo).save($0, base: $1) }
+  }
   var dirty: Bool { text != (base?.markdown ?? "# ") }
-  var title: String {
+  static func title(of text: String) -> String {
     let first = text.prefix(while: { !$0.isNewline })
     return first.hasPrefix("# ") ? first.dropFirst(2).trimmingCharacters(in: .whitespaces) : ""
   }
+  var title: String { Self.title(of: text) }
   private var lastKey: String { demo ? "last-demo-document" : "last-document" }
   func confirmDiscard() -> Bool {
-    guard !busy else {
-      NSSound.beep()
-      return false
-    }
-    guard dirty else { return true }
     let alert = NSAlert()
-    alert.messageText = "未保存の変更を破棄しますか？"
+    alert.messageText = "保存できなかった変更を破棄しますか？"
+    if !message.isEmpty { alert.informativeText = message }
     alert.addButton(withTitle: "編集に戻る")
     alert.addButton(withTitle: "破棄")
     return alert.runModal() == .alertSecondButtonReturn
   }
+  /// Saves the current note first, then runs `action`. Asks before discarding only when the
+  /// latest text could not be saved (untitled, conflicting or offline); `otherwise` runs on cancel.
+  func whenSaved(_ action: @escaping () -> Void, otherwise: @escaping () -> Void = {}) {
+    guard !busy else {
+      NSSound.beep()
+      otherwise()
+      return
+    }
+    guard dirty || saveTask != nil else { return action() }
+    busy = true
+    Task {
+      await flush()
+      busy = false
+      if !dirty || confirmDiscard() { action() } else { otherwise() }
+    }
+  }
   private func load(_ document: Document?) {
+    autosaveTimer?.cancel()
+    dirtySince = nil
+    paused = false
     base = document
     text = document?.markdown ?? "# "
     preview = false
@@ -52,10 +95,11 @@ import SwiftUI
     }
   }
   func new() {
-    guard confirmDiscard() else { return }
-    picking = false
-    message = ""
-    load(nil)
+    whenSaved { [self] in
+      picking = false
+      message = ""
+      load(nil)
+    }
   }
   func perform(_ operation: @escaping (API) async throws -> Void) {
     guard !busy else { return }
@@ -73,26 +117,97 @@ import SwiftUI
     perform { self.items = try await $0.list() }
   }
   func open(_ id: UUID) {
-    guard confirmDiscard() else { return }
-    perform { api in
-      let document = try await api.get(id)
-      self.load(document)
-      self.picking = false
+    whenSaved { [self] in
+      perform { api in
+        let document = try await api.get(id)
+        self.load(document)
+        self.picking = false
+      }
     }
   }
+  /// Explicit save (⌘S). It also retries after a conflict or a failed autosave.
   func save() {
     guard !title.isEmpty else {
       message = "1行目に「# タイトル」を入力してください。"
       return
     }
-    guard dirty else { return }
-    let draft = text
-    let original = base
-    perform { api in
-      let document = try await api.save(draft, base: original)
-      self.base = document
-      UserDefaults.standard.set(document.id.uuidString, forKey: self.lastKey)
-      self.message = "保存しました"
+    guard dirty, !busy else { return }
+    paused = false
+    Task {
+      if await flush() { message = dirty ? "保存しました。続きの変更は未保存です" : "保存しました" }
     }
+  }
+  /// Saves quietly when allowed: untitled drafts and paused (conflicting) notes are left alone.
+  func autosave() {
+    dirtySince = nil
+    guard !paused, !busy, dirty, !title.isEmpty else { return }
+    Task { await flush() }
+  }
+  private func scheduleAutosave(after delay: Duration? = nil) {
+    autosaveTimer?.cancel()
+    guard dirty else {
+      dirtySince = nil
+      return
+    }
+    let now = ContinuousClock.now
+    let since = dirtySince ?? now
+    dirtySince = since
+    let wait = delay ?? min(timing.idle, max(.zero, since + timing.limit - now))
+    autosaveTimer = Task { [weak self] in
+      do { try await Task.sleep(for: wait) } catch { return }
+      self?.autosave()
+    }
+  }
+  /// Saves the latest text, one request at a time, each based on the SHA acknowledged by the
+  /// previous one. A call during a save joins it and, if the text changed since that save started,
+  /// queues exactly one more save of the newest text. Returns `false` when saving failed.
+  @discardableResult func flush() async -> Bool {
+    if let active = saveTask {
+      if text != inFlight { again = true }
+      return await active.value
+    }
+    guard dirty else { return true }
+    let task = Task { [self] () -> Bool in
+      defer {
+        saveTask = nil
+        inFlight = nil
+        saving = false
+      }
+      let owner = revision
+      while true {
+        let draft = text
+        let original = base
+        guard draft != (original?.markdown ?? "# ") else { return true }
+        guard !Self.title(of: draft).isEmpty else { return false }
+        inFlight = draft
+        again = false
+        do {
+          let document = try await store(draft, original)
+          guard owner == revision else { return true }
+          // The response acknowledges only the submitted snapshot, never newer keystrokes.
+          base = document
+          message = ""
+          UserDefaults.standard.set(document.id.uuidString, forKey: lastKey)
+          if !dirty {
+            autosaveTimer?.cancel()
+            dirtySince = nil
+          }
+        } catch {
+          guard owner == revision else { return false }
+          message = error.localizedDescription
+          if (error as? Problem)?.status == 409 {
+            // Retrying cannot resolve a conflict; keep the draft and wait for the user.
+            paused = true
+          } else {
+            scheduleAutosave(after: timing.retry)
+          }
+          return false
+        }
+        if !again { return true }
+      }
+    }
+    saving = true
+    saveTask = task
+    return await task.value
   }
 }

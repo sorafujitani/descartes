@@ -15,6 +15,13 @@ struct NoteWindow: View {
           .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
         HStack(spacing: 8) {
           Spacer()
+          Button {
+            NSApp.sendAction(#selector(NoteText.toggleTask), to: nil, from: nil)
+          } label: {
+            Image(systemName: "checklist")
+          }
+          .help("ToDoにする／チェックを切り替える (⌘Return)").accessibilityLabel("ToDoにする")
+          .disabled(book.preview)
           Button(action: showActions) { Image(systemName: "command") }
             .help("操作とショートカット (⌘K)").accessibilityLabel("操作とショートカット")
           Button {
@@ -36,7 +43,7 @@ struct NoteWindow: View {
               book.save()
             } label: {
               Image(systemName: "square.and.arrow.down")
-            }.help("保存 (⌘S)").accessibilityLabel("保存")
+            }.help("今すぐ保存 (⌘S) · 入力が止まると自動保存します").accessibilityLabel("保存")
           }
           Button {
             book.browse()
@@ -56,8 +63,17 @@ struct NoteWindow: View {
         Text(
           book.busy
             ? "通信中…"
-            : !book.message.isEmpty
-              ? book.message : book.preview ? "プレビュー · ⌘E で編集" : book.dirty ? "未保存" : ""
+            : book.saving
+              ? "保存中…"
+              : !book.message.isEmpty
+                ? book.message
+                : book.preview
+                  ? "プレビュー · ⌘E で編集"
+                  : !book.dirty
+                    ? ""
+                    : book.paused
+                      ? "自動保存を停止中 · 内容を控えて開き直すか ⌘S で再試行"
+                      : book.title.isEmpty ? "1行目に「# タイトル」を書くと自動保存します" : "未保存 · 自動保存します"
         )
         .lineLimit(2).help(book.message).frame(maxWidth: .infinity, alignment: .leading)
         Text("\(book.text.count) characters").monospacedDigit().foregroundStyle(.secondary)
@@ -146,7 +162,11 @@ struct NoteWindow: View {
     }
     let tips = NSMenu()
     for tip in [
-      "Return：リストを続ける／空の項目で終了", "Tab / ⇧Tab：リストの字下げ／戻す",
+      "Return：リストを続ける／空の項目で字下げを戻す・終了", "Tab / ⇧Tab：リストの字下げ／戻す",
+      "⌘Return：行をToDoにする（選択した複数行もまとめて）／チェックを切り替える",
+      "[]：行頭や箇条書きの後に入力するとToDo（- [ ] ）になる",
+      "チェックボックスをクリック：チェックを切り替える（プレビュー中も可）",
+      "⌘←：箇条書き・チェックの直後へ、もう一度で行頭へ",
       "⌫：行頭の箇条書き・チェック記号をまとめて削除",
       "文書検索：↑↓で選択、Returnで開く、Escで閉じる",
     ] {
@@ -209,7 +229,7 @@ struct NoteWindow: View {
         NSEvent.ModifierFlags([.command, .option])
       ),
       ("次の見出し", "]", #selector(NoteText.nextHeading), [.command, .option]),
-      ("チェックを切り替える", "\r", #selector(NoteText.toggleTask), [.command]),
+      ("ToDoにする／チェックを切り替える", "\r", #selector(NoteText.toggleTask), [.command]),
       ("リンクを挿入", "l", #selector(NoteText.insertLink), [.command]),
       ("インラインコード", "`", #selector(NoteText.inlineCode), [.command, .shift]),
       ("太字", "b", #selector(NoteText.boldSelection), [.command]),
@@ -236,12 +256,25 @@ struct NoteWindow: View {
     NSApp.mainMenu = main
   }
   func windowShouldClose(_ sender: NSWindow) -> Bool {
-    // Termination handles the unsaved-change prompt once, including Cmd-W and the red button.
+    // Termination saves (and, if that fails, prompts) once, including Cmd-W and the red button.
     NSApp.terminate(nil)
     return false
   }
+  func applicationDidResignActive(_ notification: Notification) {
+    // Switching to another app saves at once instead of waiting for the idle delay.
+    book.autosave()
+  }
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-    book.confirmDiscard() ? .terminateNow : .terminateCancel
+    if book.busy {
+      NSSound.beep()
+      return .terminateCancel
+    }
+    guard book.dirty || book.saving else { return .terminateNow }
+    // Finish the pending save first; ask before discarding only if it could not be saved.
+    book.whenSaved(
+      { DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) } },
+      otherwise: { DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: false) } })
+    return .terminateLater
   }
 }
 @main struct Descartes {

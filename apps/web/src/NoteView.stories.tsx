@@ -60,6 +60,57 @@ export const InteractiveChecklist: Story = {
   },
 };
 
+/** The same todo commands as the Mac app: "[]" while typing and ⌘Return on any line. */
+export const TodoCreation: Story = {
+  args: { markdown: "# T" },
+  play: async ({ canvasElement, userEvent, args }) => {
+    const canvas = within(canvasElement);
+    const editor = await canvas.findByRole("textbox", { name: "Markdown本文" });
+    const mod = /Mac/.test(navigator.platform) ? "Meta" : "Control";
+    const checkboxes = () => canvas.queryAllByRole("checkbox", { name: "チェックを切り替える" });
+    await userEvent.click(editor);
+    await userEvent.keyboard(`{${mod}>}{End}{/${mod}}{Enter}- [[] 牛乳{Enter}卵`);
+    await waitFor(() => expect(checkboxes()).toHaveLength(2));
+    await expect(args.onChange).toHaveBeenLastCalledWith("# T\n- [ ] 牛乳\n- [ ] 卵", false);
+    // An empty todo ends the list; ⌘Return makes the new paragraph a todo again.
+    await userEvent.keyboard(`{Enter}{Enter}パン{${mod}>}{Enter}{/${mod}}`);
+    await waitFor(() => expect(checkboxes()).toHaveLength(3));
+    await expect(args.onChange).toHaveBeenLastCalledWith(
+      "# T\n- [ ] 牛乳\n- [ ] 卵\n- [ ] パン",
+      false,
+    );
+    // ⌘Return again checks it and saves like a checkbox click.
+    await userEvent.keyboard(`{${mod}>}{Enter}{/${mod}}`);
+    await waitFor(() => expect(checkboxes()[2]).toBeChecked());
+    await expect(args.onChange).toHaveBeenLastCalledWith(
+      "# T\n- [ ] 牛乳\n- [ ] 卵\n- [x] パン",
+      true,
+    );
+    expectReadableEditor(canvasElement);
+  },
+};
+
+export const BulletDots: Story = {
+  args: { markdown: "# T\n- 箇条書き\n  * ネスト\n- [ ] ToDo\n1. 番号" },
+  play: async ({ canvasElement, userEvent, args }) => {
+    const canvas = within(canvasElement);
+    const editor = await canvas.findByRole("textbox", { name: "Markdown本文" });
+    // Bullets show dots (like the Mac app); tasks show checkboxes and numbers stay visible.
+    await waitFor(() => expect(canvasElement.querySelectorAll(".cm-bullet")).toHaveLength(2));
+    await expect(editor).not.toHaveTextContent(/^-|\n-/);
+    await expect(editor).toHaveTextContent("1. 番号");
+    const mod = /Mac/.test(navigator.platform) ? "Meta" : "Control";
+    // ⌘Return on a bullet keeps its marker and adds the checkbox.
+    await userEvent.click(editor);
+    await userEvent.keyboard(`{${mod}>}{Home}{/${mod}}{ArrowDown}{End}{${mod}>}{Enter}{/${mod}}`);
+    await expect(args.onChange).toHaveBeenLastCalledWith(
+      "# T\n- [ ] 箇条書き\n  * ネスト\n- [ ] ToDo\n1. 番号",
+      false,
+    );
+    await waitFor(() => expect(canvasElement.querySelectorAll(".cm-bullet")).toHaveLength(1));
+  },
+};
+
 export const NaturalListEditing: Story = {
   args: { markdown: "# List" },
   play: async ({ canvasElement, userEvent, args }) => {

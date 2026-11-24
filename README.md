@@ -53,7 +53,7 @@ pnpm run deploy         # required gate, then production deployment (not pnpm's 
 
 ## Web editor and UI gate
 
-The normal view is one CodeMirror document: click and type in place, select/paste across paragraphs, continue lists with Return, and use one undo history. There are no per-line input forms or separate “add item/body” fields. Markdown is kept as text rather than reserialized from blocks; task widgets do not create checkboxes inside fenced code. Checking a task (or ⌘Return on it) saves the current document snapshot, including any other pending edits. Ordinary typing waits for **保存**. A save may finish while typing continues; newer edits remain visible and unsaved. **プレビュー** is optional, not a prerequisite for reading/checking/editing the note.
+The normal view is one CodeMirror document: click and type in place, select/paste across paragraphs, continue lists with Return, and use one undo history. There are no per-line input forms or separate “add item/body” fields. Markdown is kept as text rather than reserialized from blocks; task widgets do not create checkboxes inside fenced code. Checking a task (or ⌘Return on it) saves the current document snapshot, including any other pending edits. Ordinary typing is autosaved (see [Autosave](#autosave)); **保存** or ⌘S saves immediately. A save may finish while typing continues; newer edits remain visible and are saved next. **プレビュー** is optional, not a prerequisite for reading/checking/editing the note.
 
 The previous segmented-form implementation reused a full-editor viewport-height CSS rule for every paragraph/code field, creating giant gaps. It also broke whole-document selection/paste and disconnected editing shortcuts. Do not reintroduce that architecture or global list resets: ordinary Markdown bullets must remain visible. The Storybook regression cases cover the integrated editor, task actions, full-document paste/undo, natural list continuation, search and list loading/error states, and real block geometry at mobile/desktop widths.
 
@@ -65,26 +65,29 @@ Run `pnpm storybook` for manual review (use `--port 6007` if 6006 is occupied). 
 
 With Xcode installed, run `pnpm build:macos`, copy `apps/macos/dist/Descartes.app` to `~/Applications`, and open it. The build is ad-hoc signed for local use, not notarized for distribution. Targets macOS 14+.
 
-Type directly in the window. Start the first line with `# Title`. **⌘P** finds a document, **⌘N** starts a new one, and **⌘S** commits the current Markdown. Headings and fenced code are styled in place, not converted to HTML. The app remembers the last open document and window frame. A conflicting save retains the unsaved draft; copy it before reopening the latest version. Closing or switching documents prompts before discarding changes.
+Type directly in the window. Start the first line with `# Title`. **⌘P** finds a document, **⌘N** starts a new one, and edits are autosaved (see [Autosave](#autosave)); **⌘S** commits immediately. Headings and fenced code are styled in place, not converted to HTML. The app remembers the last open document and window frame. A conflicting save retains the unsaved draft and stops autosave; copy it before reopening the latest version. Switching documents, quitting and switching to another app save first; the app asks before discarding only changes that could not be saved.
 
-The web app and the Mac app share the same Markdown editing commands. On the web, press **⌘K** or **ショートカット**. On the Mac, use **⌘K** or the **⌘** button. Completed tasks are muted and struck through in the note view and in preview. Fenced code is shown as a Document Design System code block there; source mode still shows the fences.
+The web app and the Mac app share the same Markdown editing commands. On the web, press **⌘K** or **ショートカット**. On the Mac, use **⌘K** or the **⌘** button. Completed tasks are muted and struck through in the note view and in preview. Fenced code is shown as a Document Design System code block there; source mode still shows the fences. On both clients, **⌘Return** turns plain text, bullets and numbered items (or every selected line) into tasks (`- [ ] `) and otherwise toggles them, and typing `[]` (or `［］`) at the start of a line or bullet creates a task. Both show bullets as dots and tasks as outlined checkboxes in the same column; the command logic lives in `packages/shared/src/edit.ts` and is mirrored in the Mac app's `MarkdownCommands.swift`, with the same test tables on both sides. On the Mac, the checklist button does the same as ⌘Return, clicking a checkbox toggles it without moving the caret (also in preview), and bullets/checkboxes stay aligned with the text while typing, follow the zoom level, and wrapped item text lines up after them.
 
 **Keyboard editing** (also listed in the File, Edit and Note menus):
 
-| Keys                    | Action                                                                            |
-| ----------------------- | --------------------------------------------------------------------------------- |
-| ⌘⇧P / ⌘E                | Toggle read-only preview / return from preview to editing                         |
-| ⌘P, ↑↓, Return, Esc     | Search titles, select, open, dismiss                                              |
-| ⌘F, ⌘G / ⌘⇧G            | Find in the current note, next / previous match                                   |
-| ⌘⌥[ / ⌘⌥]               | Previous / next Markdown heading outside fenced code                              |
-| Return                  | Continue bullets, numbered items, quotes and tasks; Return on an empty item exits |
-| Tab / ⇧Tab, ⌘Return     | Indent / outdent the current list item; toggle its checkbox                       |
-| ⌘B / ⌘I / ⌘⇧`           | Wrap the selection in bold, italic or inline code                                 |
-| ⌘L                      | Insert a Markdown link and select its URL for typing                              |
-| ⌘E (editing)            | Inline code                                                                       |
-| ⌘K                      | Show actions and shortcuts; use ↑↓ and Return to execute                          |
-| ⌘+ (or ⌘=), ⌘−, ⌘0      | Increase, decrease or reset the note zoom (saved between launches)                |
-| ⌫ after a styled marker | Remove the entire bullet, checkbox or heading marker in one edit                  |
+| Keys                    | Action                                                                          |
+| ----------------------- | ------------------------------------------------------------------------------- |
+| ⌘⇧P / ⌘E                | Toggle read-only preview / return from preview to editing                       |
+| ⌘P, ↑↓, Return, Esc     | Search titles, select, open, dismiss                                            |
+| ⌘F, ⌘G / ⌘⇧G            | Find in the current note, next / previous match                                 |
+| ⌘⌥[ / ⌘⌥]               | Previous / next Markdown heading outside fenced code                            |
+| Return                  | Continue lists, quotes and tasks; an empty item outdents if nested, else exits  |
+| Tab / ⇧Tab              | Indent / outdent the current list item                                          |
+| ⌘Return                 | Make the line (or every selected line) a task, or toggle its checkbox           |
+| `[]` at a line start    | Becomes a task (`- [ ] `); a space typed right after it is absorbed             |
+| ⌘← / ←                  | Stop after a bullet/checkbox first; hidden markers never need extra key presses |
+| ⌘B / ⌘I / ⌘⇧`           | Wrap the selection in bold, italic or inline code                               |
+| ⌘L                      | Insert a Markdown link and select its URL for typing                            |
+| ⌘E (editing)            | Inline code                                                                     |
+| ⌘K                      | Show actions and shortcuts; use ↑↓ and Return to execute                        |
+| ⌘+ (or ⌘=), ⌘−, ⌘0      | Increase, decrease or reset the note zoom (saved between launches)              |
+| ⌫ after a styled marker | Remove the entire bullet, checkbox or heading marker in one edit                |
 
 Standalone notebook image references (PNG, JPEG and WebP) display as images in styled editing and preview. Source mode shows their Markdown. External URLs are never requested by the native image loader.
 
@@ -92,10 +95,21 @@ The appearance control at the top right adjusts background transparency without 
 
 To test without credentials, run `pnpm dev:demo --port 8788` and launch `open -n apps/macos/dist/Descartes.app --args --demo`. With that Worker running, `DESCARTES_TEST_DEMO=1 pnpm test:macos` exercises the native editor, create/read/update and conflicts against the in-memory repository. Demo mode never sends credentials.
 
+## Autosave
+
+Both clients save without ⌘S. Each save is one Git commit (one Worker request, two GitHub API calls and one D1 write), and GitHub limits content-creating requests to roughly 80 per minute and 500 per hour, so saves are coalesced rather than sent per keystroke:
+
+- A save starts after **4 seconds** without typing, and at the latest **45 seconds** after the first unsaved change during continuous typing. This keeps sustained writing to a few dozen commits per hour.
+- Saves also start immediately when switching documents, when the window loses focus, and on the web when the tab is hidden or closed (`keepalive` request; the unsaved-change warning still appears until the save is acknowledged). The Mac app saves before quitting.
+- Only one save is in flight. Edits made meanwhile are saved next, using the SHA returned by the previous save. Saving never makes the editor read-only.
+- Drafts without a `# Title` first line are not autosaved. A conflict (HTTP 409) stops autosave until an explicit save succeeds or another document is opened. Other failures are retried after 30 seconds.
+
+The intervals are `autosaveTiming` in `apps/web/src/App.tsx` and `Notebook.Timing` in the Mac app.
+
 ## Data and limits
 
-- Documents live at `docs/<uuid>.md`. The first line is the title (`# Title`); renaming does not change the ID or URL. Edits commit explicitly and require the SHA read by the editor. A stale save is rejected without replacing the editor's draft.
-- PNG/JPEG/WebP uploads up to 4 MiB go to `assets/<uuid>.<ext>` immediately. The editor inserts a relative Markdown reference; save the document to keep the reference. Cancelling the edit leaves the uploaded file in Git.
+- Documents live at `docs/<uuid>.md`. The first line is the title (`# Title`); renaming does not change the ID or URL. Edits are committed by autosave or an explicit save and require the SHA read by the editor. A stale save is rejected without replacing the editor's draft.
+- PNG/JPEG/WebP uploads up to 4 MiB go to `assets/<uuid>.<ext>` immediately. The editor inserts a relative Markdown reference, which is kept once the document is saved (autosave included). Cancelling the edit leaves the uploaded file in Git.
 - Title lists use pages of up to 16 documents with D1, or 32 without it. The web client displays pages progressively, independently of opening a document. Local title search is immediate; **本文も検索** enables case-insensitive, Unicode-normalized title/body substring search (all whitespace-separated terms must match, title matches first, at most 50 results with snippets). The Mac picker remains title-only.
 - Repository tree snapshots are reused for 15 seconds in a warm Worker, then revalidated using GitHub ETags. External Git edits can take up to 15 seconds to appear in lists/search; opening a document always reads its current SHA. A local save invalidates the current adapter's snapshot immediately.
 - SHA-keyed title/content caches, request coalescing and a repository-wide limit of six simultaneous blob reads reduce GitHub traffic. Caches are scoped by repository, branch and credential. With D1, only missing Git blob SHAs are fetched and indexed. Once the current tree is indexed, a search returns the best 50 matches in a single API page, including on a cold Worker. Without D1, full-text search scans the notebook in bounded pages.

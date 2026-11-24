@@ -13,12 +13,24 @@ final class MarkdownCommandsTests: XCTestCase {
   }
   @MainActor func testReturnContinuesAndExitsLists() {
     for (line, expected) in [
-      ("- メモ", "- "), ("  * entry", "  * "), ("9. 日本語", "10. "), ("  2) 😀", "  3) "),
-      ("- [X] done", "- [ ] "), ("> quote", "> "),
+      ("- メモ", "- "), ("9. 日本語", "10. "), ("- [X] done", "- [ ] "), ("> quote", "> "),
     ] {
       let view = editor(line)
       view.insertNewline(nil)
       XCTAssertEqual(view.string, line + "\n" + expected)
+      view.insertNewline(nil)
+      XCTAssertEqual(view.string, line + "\n")
+    }
+    // An empty nested item first moves out a level, then ends the list.
+    for (line, expected, outdented) in [
+      ("  * entry", "  * ", "* "), ("  2) 😀", "  3) ", "3) "), ("\t- [ ] a", "\t- [ ] ", "- [ ] "),
+    ] {
+      let view = editor(line)
+      view.insertNewline(nil)
+      XCTAssertEqual(view.string, line + "\n" + expected)
+      view.insertNewline(nil)
+      XCTAssertEqual(view.string, line + "\n" + outdented)
+      XCTAssertEqual(view.selectedRange().location, view.string.utf16.count)
       view.insertNewline(nil)
       XCTAssertEqual(view.string, line + "\n")
     }
@@ -55,6 +67,76 @@ final class MarkdownCommandsTests: XCTestCase {
     rich.isEditable = false
     rich.italicSelection()
     XCTAssertEqual(rich.string, "**[🌙](https://)**")
+  }
+  @MainActor func testCommandReturnCreatesTodos() {
+    // (line, caret offset, result, caret offset after)
+    for (line, caret, expected, after) in [
+      ("", 0, "- [ ] ", 6), ("買い物", 3, "- [ ] 買い物", 9), ("買い物", 0, "- [ ] 買い物", 6),
+      ("- 牛乳", 3, "- [ ] 牛乳", 7), ("- ", 2, "- [ ] ", 6), ("-", 1, "- [ ] ", 6),
+      ("  * nested", 10, "  * [ ] nested", 14), ("3. 番号", 5, "3. [ ] 番号", 9),
+      ("> 引用", 4, "> - [ ] 引用", 10), ("  字下げ", 5, "  - [ ] 字下げ", 11),
+      ("- [ ] open", 4, "- [x] open", 4), ("* [X] done", 10, "* [ ] done", 10),
+      ("> - [ ] 引用", 9, "> - [x] 引用", 9), ("#tag", 4, "- [ ] #tag", 10),
+    ] {
+      let view = editor("# Title\n" + line + "\n次の行")
+      view.setSelectedRange(NSRange(location: 8 + caret, length: 0))
+      view.toggleTask()
+      XCTAssertEqual(view.string, "# Title\n" + expected + "\n次の行", line)
+      XCTAssertEqual(view.selectedRange(), NSRange(location: 8 + after, length: 0), line)
+    }
+    // Headings (including the title) and fenced code are never converted.
+    for (markdown, caret) in [("# Title", 3), ("# Title\n## 見出し", 12), ("```\nコード", 6)] {
+      let view = editor(markdown)
+      view.setSelectedRange(NSRange(location: caret, length: 0))
+      view.toggleTask()
+      XCTAssertEqual(view.string, markdown)
+    }
+    // A multi-line selection converts every non-empty line, then checks them together.
+    let view = editor("# T\nA\n\n- B\n- [x] C\n```\nD\n```\n")
+    let raw = view.string as NSString
+    let start = raw.range(of: "A").location
+    view.setSelectedRange(
+      NSRange(location: start, length: raw.range(of: "C").location + 2 - start))
+    view.toggleTask()
+    XCTAssertEqual(view.string, "# T\n- [ ] A\n\n- [ ] B\n- [x] C\n```\nD\n```\n")
+    XCTAssertEqual(
+      (view.string as NSString).substring(with: view.selectedRange()),
+      "A\n\n- [ ] B\n- [x] C\n")
+    view.toggleTask()
+    XCTAssertEqual(view.string, "# T\n- [x] A\n\n- [x] B\n- [x] C\n```\nD\n```\n")
+    view.toggleTask()
+    XCTAssertEqual(view.string, "# T\n- [ ] A\n\n- [ ] B\n- [ ] C\n```\nD\n```\n")
+    // Undo restores the whole conversion in one step.
+    let undoable = editor("# T\n牛乳")
+    let window = NSWindow(
+      contentRect: undoable.frame, styleMask: [.titled], backing: .buffered, defer: false)
+    window.contentView = undoable
+    undoable.allowsUndo = true
+    undoable.undoManager?.removeAllActions()
+    undoable.toggleTask()
+    XCTAssertEqual(undoable.string, "# T\n- [ ] 牛乳")
+    undoable.undoManager?.undo()
+    XCTAssertEqual(undoable.string, "# T\n牛乳")
+  }
+  @MainActor func testTodoTypedOrCreatedIsStyledAsCheckbox() {
+    let coord = Editor.Coordinator(Notebook(demo: true))
+    let view = editor("# T\n")
+    view.delegate = coord
+    coord.style(view)
+    for character in "- [ ] 牛乳" {
+      view.insertText(String(character), replacementRange: view.selectedRange())
+    }
+    view.insertNewline(nil)
+    view.insertText("卵", replacementRange: view.selectedRange())
+    view.insertNewline(nil)
+    view.insertNewline(nil)
+    view.insertText("パン", replacementRange: view.selectedRange())
+    view.toggleTask()
+    XCTAssertEqual(view.string, "# T\n- [ ] 牛乳\n- [ ] 卵\n- [ ] パン")
+    XCTAssertEqual(view.decorations.count, 3)
+    for decoration in view.decorations {
+      guard case .task(false) = decoration.mark else { return XCTFail("\(decoration.mark)") }
+    }
   }
   @MainActor func testStyledDeleteRemovesWholeMarker() {
     let coord = Editor.Coordinator(Notebook(demo: true))

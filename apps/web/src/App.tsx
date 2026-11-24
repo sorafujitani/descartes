@@ -22,7 +22,9 @@ import {
   shortcutHelp,
   toggleTask,
   toggleTaskAt,
+  titleOf,
   wrapSelection,
+  ApiError,
   type Document,
   type Span,
 } from "@descartes/shared";
@@ -30,6 +32,13 @@ import { actionFor } from "./shortcuts";
 const defaultId = new URLSearchParams(location.search).get("doc");
 const defaultApi = client(location.origin),
   blank = "# ";
+/**
+ * Autosave waits for a pause in typing, but never leaves continuous typing unsaved for longer than
+ * the maximum delay. Every save is a Git commit, and GitHub limits content-creating requests
+ * (roughly 80 per minute and 500 per hour), so saves are coalesced instead of sent per keystroke.
+ */
+export const autosaveTiming = { idle: 4_000, max: 45_000, retry: 30_000 };
+const untitled = "1行目に「# タイトル」を入力してください。";
 export function App({
   api = defaultApi,
   initialId = defaultId,
@@ -48,6 +57,11 @@ export function App({
   const operation = useRef(Boolean(initialId));
   const latestText = useRef(text);
   latestText.current = text;
+  /** Incremented whenever another document is shown, so late save responses cannot apply to it. */
+  const session = useRef(0);
+  /** A conflict stops autosave until an explicit save succeeds or another document is opened. */
+  const [paused, setPaused] = useState(false);
+  const pausedRef = useRef(false);
   const upload = useRef<HTMLInputElement>(null);
   const area = useRef<NoteViewHandle>(null);
   const [noteSession, setNoteSession] = useState(0);
@@ -86,17 +100,19 @@ export function App({
   useEffect(() => {
     if (!dirty) return;
     const warn = (e: BeforeUnloadEvent) => {
+      // Start saving immediately, but still warn: the save is not confirmed until it is acknowledged.
+      autosaveRef.current(true);
       e.preventDefault();
       e.returnValue = "";
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
   }, [dirty]);
-  const run = useCallback(async (fn: () => Promise<void>, save = false) => {
+  /** Blocking operations (loading, switching, uploading). Saves run separately and never block typing. */
+  const run = useCallback(async (fn: () => Promise<void>) => {
     if (operation.current) return false;
     operation.current = true;
     setBusy(true);
-    setSaving(save);
     setError("");
     setNotice("");
     try {
@@ -108,14 +124,15 @@ export function App({
     } finally {
       operation.current = false;
       setBusy(false);
-      setSaving(false);
     }
   }, []);
   const select = useCallback((doc?: Document) => {
     setPreview(false);
     currentRef.current = doc;
     latestText.current = doc?.markdown ?? blank;
-    queuedSave.current = null;
+    session.current++;
+    pausedRef.current = false;
+    setPaused(false);
     setNoteSession((session) => session + 1);
     setCurrent(doc);
     setText(doc?.markdown ?? blank);
@@ -129,38 +146,31 @@ export function App({
       /* location.href is always a valid URL in a browser. */
     }
   }, []);
+  const unsaved = () => latestText.current !== (currentRef.current?.markdown ?? blank);
   const switchTo = useCallback(
     (id?: string) => {
       if (operation.current) return;
-      if (dirty && !confirm("未保存の変更を破棄しますか？")) return;
-      void run(async () => select(id ? await api.get(id) : undefined));
+      void run(async () => {
+        // Save before leaving; ask only when the latest text could not be saved.
+        await flush();
+        if (unsaved() && !confirm("保存できなかった変更を破棄しますか？")) return;
+        select(id ? await api.get(id) : undefined);
+      });
     },
-    [dirty, run, select],
+    [run, select],
   );
+  /** Explicit save (⌘S / 保存). It also retries after a conflict or a failed autosave. */
   async function save() {
-    if (operation.current) return;
-    const draft = latestText.current;
-    if (draft === (currentRef.current?.markdown ?? blank)) return;
-    const success = await run(async () => {
-      const doc = await api.save(draft, currentRef.current);
-      currentRef.current = doc;
-      // The response acknowledges only the submitted snapshot, never newer keystrokes.
-      setCurrent(doc);
-      if (latestText.current === draft) setEditing(false);
-      try {
-        const url = new URL(location.href);
-        url.searchParams.set("doc", doc.id);
-        history.replaceState(null, "", url);
-      } catch {
-        /* location.href is always a valid URL in a browser. */
-      }
-      upsert(doc);
-      setNotice(
-        latestText.current === draft ? "保存しました。" : "保存しました。続きの変更は未保存です。",
-      );
-    }, true);
-    if (!success) queuedSave.current = null;
-    else if (queuedSave.current) void saveDraft(queuedSave.current);
+    if (operation.current || !unsaved()) return;
+    if (!titleOf(latestText.current)) {
+      setError(untitled);
+      return;
+    }
+    pausedRef.current = false;
+    setPaused(false);
+    if (!(await flush())) return;
+    if (latestText.current === currentRef.current?.markdown) setEditing(false);
+    setNotice(unsaved() ? "保存しました。続きの変更は未保存です。" : "保存しました。");
   }
   async function attach(file?: File) {
     if (!file) return;
@@ -168,42 +178,121 @@ export function App({
       if (file.size > 4 * 1024 * 1024) throw new Error("画像は4 MiB以下にしてください。");
       const { path } = await api.attach(file);
       setText((t) => t + "\n\n![スクリーンショット](" + path + ")\n");
-      setNotice("画像を追加しました。本文を保存してください。");
+      setNotice("画像を追加しました。");
     });
   }
   const [preview, setPreview] = useState(false);
   const currentRef = useRef(current);
   currentRef.current = current;
-  const queuedSave = useRef<string | null>(null);
-  async function saveDraft(draft: string) {
-    queuedSave.current = draft;
-    if (operation.current) return;
-    const next = queuedSave.current;
-    queuedSave.current = null;
-    const base = currentRef.current;
-    if (!next || next === (base?.markdown ?? blank)) return;
-    const success = await run(async () => {
-      const doc = await api.save(next, base);
-      currentRef.current = doc;
-      setCurrent(doc);
-      try {
-        const url = new URL(location.href);
-        url.searchParams.set("doc", doc.id);
-        history.replaceState(null, "", url);
-      } catch {
-        /* location.href is always a valid URL in a browser. */
-      }
-      upsert(doc);
-      if (latestText.current !== next) setNotice("保存しました。続きの変更は未保存です。");
-    }, true);
-    if (!success) queuedSave.current = null;
-    else if (queuedSave.current) void saveDraft(queuedSave.current);
+  const writing = useRef<{ draft: string; again: boolean; promise: Promise<boolean> } | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const dirtySince = useRef<number | null>(null);
+  function schedule(delay: number) {
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => autosaveRef.current(), delay);
   }
+  /**
+   * Saves the latest text with one request at a time, each based on the SHA acknowledged by the
+   * previous one. A call while a save is in flight joins it and, if the text has changed since that
+   * save started, queues exactly one more save of the newest text. Resolves `false` on failure.
+   */
+  function flush(keepalive = false): Promise<boolean> {
+    const active = writing.current;
+    if (active) {
+      if (latestText.current !== active.draft) active.again = true;
+      return active.promise;
+    }
+    if (!unsaved()) return Promise.resolve(true);
+    const state = { draft: latestText.current, again: false, promise: Promise.resolve(true) };
+    writing.current = state;
+    setSaving(true);
+    state.promise = (async () => {
+      const owner = session.current;
+      try {
+        while (true) {
+          const draft = latestText.current;
+          const base = currentRef.current;
+          if (draft === (base?.markdown ?? blank)) return true;
+          if (!titleOf(draft)) return false;
+          state.draft = draft;
+          state.again = false;
+          const doc = await api.save(draft, base, { keepalive });
+          keepalive = false;
+          upsert(doc);
+          if (owner !== session.current) return true;
+          currentRef.current = doc;
+          // The response acknowledges only the submitted snapshot, never newer keystrokes.
+          setCurrent(doc);
+          setError("");
+          try {
+            const url = new URL(location.href);
+            url.searchParams.set("doc", doc.id);
+            history.replaceState(null, "", url);
+          } catch {
+            /* location.href is always a valid URL in a browser. */
+          }
+          if (!state.again) return true;
+        }
+      } catch (error) {
+        if (owner !== session.current) return false;
+        setError(messageOf(error));
+        if (error instanceof ApiError && error.status === 409) {
+          // Retrying cannot resolve a conflict; keep the draft and wait for the user.
+          pausedRef.current = true;
+          setPaused(true);
+        } else schedule(autosaveTiming.retry);
+        return false;
+      } finally {
+        writing.current = null;
+        setSaving(false);
+      }
+    })();
+    return state.promise;
+  }
+  /** Saves quietly when allowed; untitled drafts and paused (conflicting) notes are left alone. */
+  function autosave(keepalive = false) {
+    dirtySince.current = null;
+    if (pausedRef.current || operation.current || !unsaved()) return;
+    if (!titleOf(latestText.current)) return;
+    void flush(keepalive);
+  }
+  const autosaveRef = useRef(autosave);
+  autosaveRef.current = autosave;
+  useEffect(() => {
+    if (!dirty) {
+      dirtySince.current = null;
+      clearTimeout(timer.current);
+      return;
+    }
+    const now = Date.now();
+    dirtySince.current ??= now;
+    schedule(
+      Math.max(0, Math.min(autosaveTiming.idle, dirtySince.current + autosaveTiming.max - now)),
+    );
+  }, [text, dirty]);
+  useEffect(() => {
+    // Leaving the window, hiding the tab (the last reliable moment on mobile) or closing it saves now.
+    const now = () => autosaveRef.current();
+    const hidden = () => {
+      if (document.visibilityState === "hidden") autosaveRef.current(true);
+    };
+    const leaving = () => autosaveRef.current(true);
+    window.addEventListener("blur", now);
+    document.addEventListener("visibilitychange", hidden);
+    window.addEventListener("pagehide", leaving);
+    return () => {
+      window.removeEventListener("blur", now);
+      document.removeEventListener("visibilitychange", hidden);
+      window.removeEventListener("pagehide", leaving);
+      clearTimeout(timer.current);
+    };
+  }, []);
   function updateNote(next: string, persist = false) {
     latestText.current = next;
     setText(next);
+    setNotice("");
     if (!persist) return;
-    void saveDraft(next);
+    void flush();
   }
   useEffect(() => localStorage.setItem("noteZoomTenths", String(zoom)), [zoom]);
   useEffect(() => {
@@ -257,7 +346,7 @@ export function App({
     function onKey(event: KeyboardEvent) {
       if (event.defaultPrevented) return;
       const action = actionFor(event);
-      if (!action || (busy && !saving) || event.isComposing) return;
+      if (!action || busy || event.isComposing) return;
       const target = event.target;
       const typingSearch = target === search.current;
       const typingFind = target === finder.current;
@@ -345,7 +434,19 @@ export function App({
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [busy, saving, current, editing, preview, query, save, switchTo, text]);
+  }, [busy, current, editing, preview, query, save, switchTo, text]);
+  const status = busy
+    ? "読み書きしています…"
+    : saving
+      ? "保存しています…"
+      : notice ||
+        (!dirty
+          ? ""
+          : paused
+            ? "自動保存を停止しています。内容を控えてから開き直すか、⌘S で再試行してください。"
+            : !titleOf(text)
+              ? "1行目に「# タイトル」を書くと自動保存します。"
+              : "未保存の変更があります（自動保存します）。");
   return (
     <>
       <header>
@@ -367,7 +468,7 @@ export function App({
           onSelect={switchTo}
         />
         <section aria-label="文書">
-          <div role="status">{busy ? "読み書きしています…" : notice}</div>
+          <div role="status">{status}</div>
           {error && <p role="alert">{error}</p>}
           {editing || current ? (
             <>
@@ -385,10 +486,14 @@ export function App({
                     e.target.value = "";
                   }}
                 />
-                <button disabled={busy || !dirty} onClick={() => void save()}>
+                <button
+                  disabled={busy || !dirty}
+                  title="自動保存されます。今すぐ保存するときは ⌘S"
+                  onClick={() => void save()}
+                >
                   保存
                 </button>
-                <button disabled={busy && !saving} onClick={() => setPreview((value) => !value)}>
+                <button disabled={busy} onClick={() => setPreview((value) => !value)}>
                   {preview ? "本文に戻る" : "プレビュー"}
                 </button>
                 {dirty && (
@@ -409,7 +514,7 @@ export function App({
                     ref={area}
                     markdown={text}
                     onChange={updateNote}
-                    readOnly={busy && !saving}
+                    readOnly={busy}
                     focusAt={editing && !current ? 2 : null}
                   />
                 </div>
