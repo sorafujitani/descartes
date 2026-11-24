@@ -1,0 +1,204 @@
+{
+  "about": "Editing scenarios run by both editors: apps/macos/Tests/DescartesTests/EditorScenarioTests.swift (NSTextView) and apps/web/src/EditingScenarios.stories.tsx (CodeMirror in Chromium). `caret` is an index or {\"after\": text}; `select` selects the first occurrence of a text. `keys` is typed character by character; {return} {tab} {backtab} {backspace} {left} {right} {up} {down} {home} {end} {cmd-return} are keys. `expect` is the Markdown and `caretAfter` the text just before the final caret.",
+  "scenarios": [
+    {
+      "name": "type a whole code block, closing fence included",
+      "doc": "# T\n",
+      "keys": "```swift{return}let a = 1{return}let b = 2{return}```{return}後の段落",
+      "expect": "# T\n```swift\nlet a = 1\nlet b = 2\n```\n後の段落"
+    },
+    {
+      "name": "return after an opening fence closes the block",
+      "doc": "# T\n\n後の段落",
+      "caret": {
+        "after": "# T\n"
+      },
+      "keys": "```js{return}console.log(1)",
+      "expect": "# T\n```js\nconsole.log(1)\n```\n後の段落",
+      "caretAfter": "console.log(1)"
+    },
+    {
+      "name": "tilde fences and an unclosed block at the end",
+      "doc": "# T\n",
+      "keys": "~~~~{return}~~~{return}code{return}~~~~{return}{return}```{return}open",
+      "expect": "# T\n~~~~\n~~~\ncode\n~~~~\n\n```\nopen\n```"
+    },
+    {
+      "name": "an already closed fence gets a plain newline",
+      "doc": "# T\n```\na\n```",
+      "caret": {
+        "after": "# T\n```"
+      },
+      "keys": "{return}b",
+      "expect": "# T\n```\nb\na\n```"
+    },
+    {
+      "name": "list syntax inside code stays literal",
+      "doc": "# T\n```\n- item\n```\n",
+      "caret": {
+        "after": "- item"
+      },
+      "keys": "{return}[]x",
+      "expect": "# T\n```\n- item\n[]x\n```\n"
+    },
+    {
+      "name": "lists continue, indent, outdent and end",
+      "doc": "# T\n",
+      "keys": "- a{return}{tab}b{return}{return}c{return}{return}d",
+      "expect": "# T\n- a\n  - b\n- c\nd"
+    },
+    {
+      "name": "numbered lists continue and end",
+      "doc": "# T\n",
+      "keys": "1. 一{return}二{return}{return}後",
+      "expect": "# T\n1. 一\n2. 二\n後"
+    },
+    {
+      "name": "todos from [] and command-return",
+      "doc": "# T\n",
+      "keys": "[] 牛乳{return}卵{return}{return}パン{cmd-return}",
+      "expect": "# T\n- [ ] 牛乳\n- [ ] 卵\n- [ ] パン",
+      "caretAfter": "パン"
+    },
+    {
+      "name": "command-return checks a todo without moving the caret",
+      "doc": "# T\n- [ ] 牛乳\n- 卵",
+      "caret": {
+        "after": "牛"
+      },
+      "keys": "{cmd-return}",
+      "expect": "# T\n- [x] 牛乳\n- 卵",
+      "caretAfter": "- [x] 牛"
+    },
+    {
+      "name": "command-return keeps a bullet and adds the checkbox",
+      "doc": "# T\n- 卵",
+      "keys": "{cmd-return}",
+      "expect": "# T\n- [ ] 卵",
+      "caretAfter": "卵"
+    },
+    {
+      "name": "[] after a bullet and full-width brackets",
+      "doc": "# T\n",
+      "keys": "- [] 卵{return}{return}［］ パン",
+      "expect": "# T\n- [ ] 卵\n- [ ] パン"
+    },
+    {
+      "name": "return at the start of item text adds an empty item above",
+      "doc": "# T\n- [ ] a",
+      "caret": {
+        "after": "- [ ] "
+      },
+      "keys": "{return}",
+      "expect": "# T\n- [ ] \n- [ ] a"
+    },
+    {
+      "name": "home stops after the checkbox, backspace removes the marker",
+      "doc": "# T\n- [ ] 牛乳\n- [ ] 卵",
+      "keys": "{home}{backspace}",
+      "expect": "# T\n- [ ] 牛乳\n卵",
+      "caretAfter": "牛乳\n"
+    },
+    {
+      "name": "backspace after a bullet removes the bullet",
+      "doc": "# T\n- 卵",
+      "keys": "{home}{backspace}",
+      "expect": "# T\n卵"
+    },
+    {
+      "name": "headings typed character by character",
+      "doc": "# ",
+      "keys": "タイトル{return}## 節{return}本文 **太字** と `code`",
+      "expect": "# タイトル\n## 節\n本文 **太字** と `code`"
+    },
+    {
+      "name": "a heading appears when its space is typed",
+      "doc": "# T\n",
+      "keys": "##x{left} ",
+      "expect": "# T\n## x",
+      "caretAfter": "## "
+    },
+    {
+      "name": "return inside a heading splits it",
+      "doc": "# タイトル",
+      "caret": {
+        "after": "# タイ"
+      },
+      "keys": "{return}",
+      "expect": "# タイ\nトル"
+    },
+    {
+      "name": "typing over a selection that spans markers and lines",
+      "doc": "# T\n- ab\n- [ ] c\nd",
+      "select": "b\n- [ ] c",
+      "keys": "X",
+      "expect": "# T\n- aX\nd"
+    },
+    {
+      "name": "tab inside code inserts a tab at the caret",
+      "doc": "# T\n```\nab\n```",
+      "caret": {
+        "after": "a"
+      },
+      "keys": "{tab}x",
+      "expect": "# T\n```\na\txb\n```"
+    },
+    {
+      "name": "tab in a paragraph inserts a tab at the caret",
+      "doc": "# T\nab",
+      "caret": {
+        "after": "a"
+      },
+      "keys": "{tab}",
+      "expect": "# T\na\tb"
+    },
+    {
+      "name": "tab and shift-tab indent and outdent a todo from anywhere in it",
+      "doc": "# T\n- [ ] 牛乳",
+      "caret": {
+        "after": "牛"
+      },
+      "keys": "{tab}{tab}{backtab}",
+      "expect": "# T\n  - [ ] 牛乳",
+      "caretAfter": "牛"
+    },
+    {
+      "name": "quotes continue and an empty quote line ends them",
+      "doc": "# T\n",
+      "keys": "> 引用{return}続き{return}{return}後",
+      "expect": "# T\n> 引用\n> 続き\n後"
+    },
+    {
+      "name": "return in the middle of item text splits the item",
+      "doc": "# T\n- [x] 牛乳卵",
+      "caret": {
+        "after": "牛乳"
+      },
+      "keys": "{return}",
+      "expect": "# T\n- [x] 牛乳\n- [ ] 卵",
+      "caretAfter": "- [ ] "
+    },
+    {
+      "name": "backspace on an empty item removes it, a second joins the lines",
+      "doc": "# T\n- a\n- ",
+      "keys": "{backspace}{backspace}",
+      "expect": "# T\n- a"
+    },
+    {
+      "name": "return at the start of heading text inserts a line above it",
+      "doc": "# T\n## 節",
+      "caret": {
+        "after": "## "
+      },
+      "keys": "{return}",
+      "expect": "# T\n\n## 節",
+      "caretAfter": "\n\n## "
+    },
+    {
+      "name": "the Japanese IME's 「」 also creates a todo, but not around text",
+      "doc": "# T\n",
+      "keys": "「」牛乳{return}{return}「引用」",
+      "expect": "# T\n- [ ] 牛乳\n「引用」"
+    }
+  ]
+}

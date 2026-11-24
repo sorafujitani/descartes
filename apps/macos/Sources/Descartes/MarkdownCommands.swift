@@ -101,6 +101,10 @@ struct TaskLine {
 }
 
 extension NoteText {
+  /// The note's own line break, so CRLF notes do not get mixed line endings.
+  var lineBreak: String {
+    (string as NSString).range(of: "\r\n").location == NSNotFound ? "\n" : "\r\n"
+  }
   private var currentLine: (range: NSRange, line: String, code: Bool) {
     let raw = string as NSString
     let range = raw.lineRange(for: NSRange(location: selectedRange().location, length: 0))
@@ -110,8 +114,9 @@ extension NoteText {
     return (range, line, fence.consumes(line[...]))
   }
   private static let todoShortcut = try? NSRegularExpression(
-    pattern: #"^([ \t]*)(?:([-*+])[ \t]+)?(?:\[\]|［］)$"#)
-  /// "[]" (or full-width "［］") typed at the start of a line or bullet becomes "- [ ] ".
+    pattern: #"^([ \t]*)(?:([-*+])[ \t]+)?(?:\[\]|［］|「」)$"#)
+  /// "[]" (or "［］", or the Japanese IME's "「」") typed at the start of a line or bullet
+  /// becomes "- [ ] ".
   /// A space typed right after it is absorbed, so typing "- [] 牛乳" gives "- [ ] 牛乳".
   func completeTodoShortcut() {
     guard isEditable, !hasMarkedText(), selectedRange().length == 0 else { return }
@@ -136,6 +141,66 @@ extension NoteText {
       replacementRange: NSRange(location: range.location, length: before.length))
     if !separated { swallowSpaceAt = selectedRange().location }
   }
+  /// Return at the end of an opening fence that nothing closes adds the closing fence and puts
+  /// the caret inside, so the rest of the note does not become code. Mirrors `closeFence` in
+  /// packages/shared/src/edit.ts.
+  func closeFence() -> Bool {
+    guard isEditable, !hasMarkedText(), selectedRange().length == 0 else { return false }
+    let raw = string as NSString
+    let caret = selectedRange().location
+    let range = raw.lineRange(for: NSRange(location: caret, length: 0))
+    let line = raw.substring(with: range).trimmingCharacters(in: .newlines)
+    guard caret == range.location + line.utf16.count else { return false }
+    var fence = Fence()
+    raw.substring(to: range.location).enumerateLines { line, _ in _ = fence.consumes(line[...]) }
+    let insideBlock = fence.delimiter != nil
+    guard fence.consumes(line[...]) else { return false }
+    if insideBlock {
+      // Typing the closing fence by hand right above the one Return already added steps over
+      // it instead of leaving two fences (like typing a closing bracket).
+      guard fence.delimiter == nil, NSMaxRange(range) < raw.length else { return false }
+      let next = raw.lineRange(for: NSRange(location: NSMaxRange(range), length: 0))
+      let nextLine = raw.substring(with: next).trimmingCharacters(in: .newlines)
+      let trimmed = line.trimmingCharacters(in: .whitespaces)
+      guard nextLine.trimmingCharacters(in: .whitespaces) == trimmed else { return false }
+      insertText(
+        lineBreak,
+        replacementRange: NSRange(
+          location: caret, length: next.location + nextLine.utf16.count - caret))
+      return true
+    }
+    guard let delimiter = fence.delimiter else { return false }
+    var closed = false
+    raw.substring(from: NSMaxRange(range)).enumerateLines { line, stop in
+      _ = fence.consumes(line[...])
+      if fence.delimiter == nil {
+        closed = true
+        stop = true
+      }
+    }
+    guard !closed else { return false }
+    let indent = line.prefix(while: { $0 == " " || $0 == "\t" })
+    let newline = lineBreak
+    insertText(newline + newline + indent + delimiter, replacementRange: selectedRange())
+    setSelectedRange(NSRange(location: caret + newline.utf16.count, length: 0))
+    return true
+  }
+  /// Return at the start of a heading's text inserts an empty line above the heading instead of
+  /// splitting "## " from its text (as Return does at the start of an item). Not on the title.
+  /// Mirrors `breakBeforeHeading` in packages/shared/src/edit.ts.
+  func breakBeforeHeading() -> Bool {
+    guard isEditable, !hasMarkedText(), selectedRange().length == 0 else { return false }
+    let (range, line, code) = currentLine
+    let level = line.prefix(while: { $0 == "#" }).count
+    guard !code, range.location > 0, (1...6).contains(level), line.dropFirst(level).first == " ",
+      selectedRange().location == range.location + level + 1, line.utf16.count > level + 1
+    else { return false }
+    let newline = lineBreak
+    let caret = selectedRange().location
+    insertText(newline, replacementRange: NSRange(location: range.location, length: 0))
+    setSelectedRange(NSRange(location: caret + newline.utf16.count, length: 0))
+    return true
+  }
   func continueList() -> Bool {
     guard isEditable, !hasMarkedText(), selectedRange().length == 0 else { return false }
     let (range, line, code) = currentLine
@@ -146,7 +211,7 @@ extension NoteText {
       if !item.indent.isEmpty { return indentItem(outdent: true) }
       insertText("", replacementRange: NSRange(location: range.location, length: item.length))
     } else {
-      insertText("\n" + item.next, replacementRange: selectedRange())
+      insertText(lineBreak + item.next, replacementRange: selectedRange())
     }
     return true
   }

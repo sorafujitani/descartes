@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
 import {
+  breakBeforeHeading,
+  closeFence,
   continueList,
+  deleteMarker,
+  markerEnd,
   findMatch,
   headingCaret,
   indentItem,
@@ -168,4 +172,34 @@ test("typing [] at the start of a line or bullet creates a todo", () => {
     insert: "- [ ]",
     absorbSpace: false,
   });
+});
+
+test("Return closes a new fence, steps over the closing fence and leaves closed blocks alone", () => {
+  assert.deepEqual(closeFence("# T\n```js", 9), { text: "# T\n```js\n\n```", start: 10, end: 10 });
+  assert.deepEqual(closeFence("  ~~~\nrest", 5)?.text, "  ~~~\n\n  ~~~\nrest");
+  assert.equal(closeFence("```\na\n```", 3), undefined, "already closed");
+  assert.equal(closeFence("```js", 2), undefined, "not at the end of the line");
+  assert.equal(closeFence("plain", 5), undefined);
+  // Typing ``` right above the inserted closing fence steps over it.
+  assert.deepEqual(closeFence("```\na\n```\n```", 9), {
+    text: "```\na\n```\n",
+    start: 10,
+    end: 10,
+  });
+  assert.equal(closeFence("```\r\na\r\n```\r\n```", 11)?.text, "```\r\na\r\n```\r\n");
+  assert.equal(closeFence("# T\r\n```", 8)?.text, "# T\r\n```\r\n\r\n```");
+});
+
+test("heading Return, marker Backspace and smart line start follow the Mac editor", () => {
+  assert.deepEqual(breakBeforeHeading("# T\n## 節", 7), { text: "# T\n\n## 節", start: 8, end: 8 });
+  assert.equal(breakBeforeHeading("# T", 2), undefined, "never above the title");
+  assert.equal(breakBeforeHeading("# T\n## ", 7), undefined, "empty heading");
+  assert.equal(breakBeforeHeading("```\n## x", 7), undefined, "inside code");
+  assert.equal(breakBeforeHeading("# T\r\n## 節", 8)?.text, "# T\r\n\r\n## 節");
+  assert.deepEqual(deleteMarker("# T\n  - [ ] a", 12), { text: "# T\n  a", start: 6, end: 6 });
+  assert.equal(deleteMarker("# T\n- a", 6)?.text, "# T\na");
+  assert.equal(deleteMarker("# T\n- a", 7), undefined, "not directly after the marker");
+  assert.equal(deleteMarker("```\n- a", 6), undefined, "inside code");
+  assert.equal(markerEnd("  * [x] done"), 8);
+  assert.equal(markerEnd("1. item"), undefined);
 });

@@ -212,10 +212,19 @@ final class MarkdownCommandsTests: XCTestCase {
       view.textStorage?.attribute(.foregroundColor, at: open.location, effectiveRange: nil)
         as? NSColor, Theme.text)
     XCTAssertEqual(view.codeBlocks.count, 1)
+    // While editing, fences stay visible but muted; read-only preview hides them.
+    XCTAssertEqual(
+      view.textStorage?.attribute(
+        .foregroundColor, at: raw.range(of: "```").location, effectiveRange: nil)
+        as? NSColor, Theme.muted)
+    coord.preview = true
+    coord.style(view)
     XCTAssertEqual(
       view.textStorage?.attribute(
         .foregroundColor, at: raw.range(of: "```").location, effectiveRange: nil)
         as? NSColor, NSColor.clear)
+    coord.preview = false
+    coord.style(view)
     XCTAssertEqual(
       view.textStorage?.attribute(
         .foregroundColor, at: raw.range(of: "console").location, effectiveRange: nil)

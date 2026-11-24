@@ -63,7 +63,9 @@ final class NoteText: NSTextView {
       return
     }
     super.insertText(insertString, replacementRange: replacementRange)
-    if autoFormat, typed.hasSuffix("]") || typed.hasSuffix("］") { completeTodoShortcut() }
+    if autoFormat, ["]", "］", "」"].contains(where: { typed.hasSuffix($0) }) {
+      completeTodoShortcut()
+    }
   }
 
   override var typingAttributes: [NSAttributedString.Key: Any] {
@@ -103,13 +105,37 @@ final class NoteText: NSTextView {
     }
     // Hidden marker characters have no visible width. Keep a caret out of them so arrow keys
     // and clicks never need invisible extra steps or split "- [ ] " while typing.
-    if ranges.count == 1, !hasMarkedText(), ranges[0].rangeValue.length == 0,
-      let marker = atomicRange(around: ranges[0].rangeValue.location)
-    {
-      let location = movingBackward ? marker.location : NSMaxRange(marker)
-      ranges = [NSValue(range: NSRange(location: location, length: 0))]
+    if ranges.count == 1, !hasMarkedText(), ranges[0].rangeValue.length == 0 {
+      let location = ranges[0].rangeValue.location
+      if let marker = invisibleMarker(startingAt: location) {
+        // A heading's hidden "# " has no dot or checkbox, so a caret before it looks exactly
+        // like one after it, and typing there broke the heading ("x# Title"). Only the end of
+        // the marker is a caret stop; ← from it continues to the previous line.
+        ranges = [NSValue(range: NSRange(location: NSMaxRange(marker), length: 0))]
+      } else if let marker = atomicRange(around: location) {
+        var target = movingBackward ? marker.location : NSMaxRange(marker)
+        if movingBackward, invisibleMarker(startingAt: marker.location) != nil {
+          target =
+            marker.location > 0
+            ? (string as NSString).rangeOfComposedCharacterSequence(at: marker.location - 1)
+              .location : NSMaxRange(marker)
+        }
+        ranges = [NSValue(range: NSRange(location: target, length: 0))]
+      }
     }
     super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
+  }
+  /// A hidden marker without a drawn decoration (a heading's "# ") that starts at `location`.
+  private func invisibleMarker(startingAt location: Int) -> NSRange? {
+    guard let storage = textStorage, location < storage.length else { return nil }
+    var range = NSRange()
+    guard
+      storage.attribute(
+        Self.atomicMarker, at: location, longestEffectiveRange: &range,
+        in: NSRange(location: 0, length: storage.length)) != nil,
+      range.location == location, !decorations.contains(where: { $0.at == location })
+    else { return nil }
+    return range
   }
   private func backward(_ move: () -> Void) {
     movingBackward = true
@@ -124,7 +150,7 @@ final class NoteText: NSTextView {
   /// the true line start.
   private func smartLineStart(_ move: () -> Void) {
     let before = selectedRange()
-    backward(move)
+    move()
     let after = selectedRange()
     guard let storage = textStorage, after.length == 0, after.location < storage.length,
       before.location > after.location
@@ -148,7 +174,12 @@ final class NoteText: NSTextView {
     smartLineStart { super.moveToBeginningOfParagraph(sender) }
   }
   override func insertNewline(_ sender: Any?) {
-    if !continueList() { super.insertNewline(sender) }
+    guard !closeFence(), !breakBeforeHeading(), !continueList() else { return }
+    if isEditable, !hasMarkedText(), lineBreak == "\r\n" {
+      insertText(lineBreak, replacementRange: selectedRange())
+    } else {
+      super.insertNewline(sender)
+    }
   }
   override func insertTab(_ sender: Any?) {
     if !indentItem(outdent: false) { super.insertTab(sender) }
@@ -530,20 +561,33 @@ struct Editor: NSViewRepresentable {
           range: range)
         return
       }
-      if opened || closed {
-        let pad = NSMutableParagraphStyle()
-        pad.minimumLineHeight = 16 * scale
-        if closed { pad.paragraphSpacing = 24 * scale }
-        storage.addAttribute(.paragraphStyle, value: pad, range: range)
-        storage.addAttributes(
-          [.font: NSFont.systemFont(ofSize: 0.1), .foregroundColor: NSColor.clear], range: range)
-        return
-      }
       let body = NSMutableParagraphStyle()
-      body.minimumLineHeight = 22.4 * scale
       body.headIndent = 16 * scale
       body.firstLineHeadIndent = 16 * scale
       body.tailIndent = -16 * scale
+      if opened || closed {
+        if closed { body.paragraphSpacing = 12 * scale }
+        if preview {
+          // Read-only preview shows only the block; the delimiters become thin padding.
+          body.minimumLineHeight = 16 * scale
+          storage.addAttributes(
+            [
+              .font: NSFont.systemFont(ofSize: 0.1), .foregroundColor: NSColor.clear,
+              .paragraphStyle: body,
+            ], range: range)
+          return
+        }
+        // While editing, the fences (and the language after ```) stay visible but quiet.
+        // Hiding them made a typed ``` vanish and everything typed after it invisible.
+        body.minimumLineHeight = 20 * scale
+        storage.addAttributes(
+          [
+            .font: NSFont.monospacedSystemFont(ofSize: 12 * scale, weight: .regular),
+            .foregroundColor: Theme.muted, .paragraphStyle: body,
+          ], range: range)
+        return
+      }
+      body.minimumLineHeight = 22.4 * scale
       storage.addAttributes(
         [
           .font: NSFont.monospacedSystemFont(ofSize: 14 * scale, weight: .regular),

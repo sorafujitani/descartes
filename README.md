@@ -67,7 +67,7 @@ With Xcode installed, run `pnpm build:macos`, copy `apps/macos/dist/Descartes.ap
 
 Type directly in the window. Start the first line with `# Title`. **⌘P** finds a document, **⌘N** starts a new one, and edits are autosaved (see [Autosave](#autosave)); **⌘S** commits immediately. Headings and fenced code are styled in place, not converted to HTML. The app remembers the last open document and window frame. A conflicting save retains the unsaved draft and stops autosave; copy it before reopening the latest version. Switching documents, quitting and switching to another app save first; the app asks before discarding only changes that could not be saved.
 
-The web app and the Mac app share the same Markdown editing commands. On the web, press **⌘K** or **ショートカット**. On the Mac, use **⌘K** or the **⌘** button. Completed tasks are muted and struck through in the note view and in preview. Fenced code is shown as a Document Design System code block there; source mode still shows the fences. On both clients, **⌘Return** turns plain text, bullets and numbered items (or every selected line) into tasks (`- [ ] `) and otherwise toggles them, and typing `[]` (or `［］`) at the start of a line or bullet creates a task. Both show bullets as dots and tasks as outlined checkboxes in the same column; the command logic lives in `packages/shared/src/edit.ts` and is mirrored in the Mac app's `MarkdownCommands.swift`, with the same test tables on both sides. On the Mac, the checklist button does the same as ⌘Return, clicking a checkbox toggles it without moving the caret (also in preview), and bullets/checkboxes stay aligned with the text while typing, follow the zoom level, and wrapped item text lines up after them.
+The web app and the Mac app share the same Markdown editing commands. On the web, press **⌘K** or **ショートカット**. On the Mac, use **⌘K** or the **⌘** button. Completed tasks are muted and struck through in the note view and in preview. Fenced code is shown as a Document Design System code block; while editing, its fences (and the language after ` ``` `) stay visible but muted, and read-only preview hides them. Return after an opening fence adds the closing fence and puts the caret inside; typing the closing fence by hand steps over it. On both clients, **⌘Return** turns plain text, bullets and numbered items (or every selected line) into tasks (`- [ ] `) and otherwise toggles them, and typing `[]` (or `［］`, or the Japanese IME's `「」`) at the start of a line or bullet creates a task. Both show bullets as dots and tasks as outlined checkboxes in the same column; the command logic lives in `packages/shared/src/edit.ts` and is mirrored in the Mac app's `MarkdownCommands.swift`, with the same test tables on both sides. On the Mac, the checklist button does the same as ⌘Return, clicking a checkbox toggles it without moving the caret (also in preview), and bullets/checkboxes stay aligned with the text while typing, follow the zoom level, and wrapped item text lines up after them.
 
 **Keyboard editing** (also listed in the File, Edit and Note menus):
 
@@ -78,7 +78,9 @@ The web app and the Mac app share the same Markdown editing commands. On the web
 | ⌘F, ⌘G / ⌘⇧G            | Find in the current note, next / previous match                                 |
 | ⌘⌥[ / ⌘⌥]               | Previous / next Markdown heading outside fenced code                            |
 | Return                  | Continue lists, quotes and tasks; an empty item outdents if nested, else exits  |
-| Tab / ⇧Tab              | Indent / outdent the current list item                                          |
+| Return after ` ``` `    | Add the closing fence (if nothing closes the block) and type inside it          |
+| Return at heading text  | Insert an empty line above the heading instead of splitting `##` from its text  |
+| Tab / ⇧Tab              | Indent / outdent the current list item; elsewhere Tab inserts a tab             |
 | ⌘Return                 | Make the line (or every selected line) a task, or toggle its checkbox           |
 | `[]` at a line start    | Becomes a task (`- [ ] `); a space typed right after it is absorbed             |
 | ⌘← / ←                  | Stop after a bullet/checkbox first; hidden markers never need extra key presses |
@@ -116,6 +118,14 @@ The intervals are `autosaveTiming` in `apps/web/src/App.tsx` and `Notebook.Timin
 - Ox Content parses Markdown in a dedicated browser Worker with sanitization enabled and MDX disabled. DOMPurify sanitizes the result before insertion. Only repository screenshots are displayed inline. The stored Markdown is unchanged. Rendered HTML is cached only in bounded page memory, never localStorage/IndexedDB.
 - Web saves acknowledge the submitted snapshot without blocking further typing. A second save uses the returned SHA; later keystrokes remain dirty. Unchanged documents do not create a commit. The storage adapter serializes same-isolate branch writes; independent Worker isolates and external edits still rely on GitHub SHA conflicts.
 
+## Editor behaviour tests
+
+Editing bugs are caught with keystroke scenarios rather than only unit tests of the command functions:
+
+- **Shared scenarios** — [`tests/fixtures/editing-scenarios.json`](tests/fixtures/editing-scenarios.json) lists a starting note, caret, keys (`{return}`, `{tab}`, `{cmd-return}`, …) and the expected Markdown/caret. The Mac suite types them into the real `NSTextView` (`EditorScenarioTests.testSharedScenariosMatchTheWebEditor`) and Storybook types them into the real CodeMirror editor in Chromium (`EditingScenarios.stories.tsx`). A behaviour difference between the clients fails one side; add a scenario for every editing bug fixed.
+- **Mac invariants after every key** — `Scenario` in `EditorScenarioTests.swift` checks after each keystroke and IME step that the caret line (and any IME composition) is visible, typing attributes are visible, the caret is never inside a hidden marker, incremental styling equals a full restyle, and the notebook text mirrors the view. One undo group per simulated key keeps undo/redo realistic.
+- **Shared command unit tests** — `tests/edit.test.ts` covers `packages/shared/src/edit.ts` (Return, Backspace, ⌘Return, `[]`, fences, CRLF) quickly in `pnpm test`.
+
 ## Architecture and performance verification
 
 `apps/api/src/routes.ts` owns Hono routing, write-origin checks, validation and JSON errors. `auth.ts` verifies Access JWTs before the production repository resolver can be reached. `repository.ts` is the storage contract; both the loopback demo and GitHub adapter implement it. Repository privacy checks are coalesced only while in flight, **not cached across requests**. All API responses, including errors, remain private/no-store.
@@ -130,7 +140,7 @@ The native editor re-attributes only the edited line when a single UTF-16 edit p
 pnpm test        # API, cache/concurrency, search, client, actual WASM, jsdom save/render races and sanitization
 pnpm check      # TypeScript, formatting and lint
 pnpm build      # production Worker + web, including the dedicated Markdown Worker
-pnpm test:macos # incremental styling / full-style equivalence, UTF-16, IME, undo and drawing
+pnpm test:macos # keystroke scenarios with invariants, shared web/Mac scenarios, incremental styling, IME, undo
 # With pnpm dev:demo --port 8788 running:
 DESCARTES_TEST_DEMO=1 pnpm test:macos # native create/read/update/conflicts and screenshot rendering
 ```

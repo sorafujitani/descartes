@@ -1,6 +1,17 @@
 import { forwardRef, useImperativeHandle, useLayoutEffect, useRef } from "react";
 import { Annotation, Compartment, EditorState } from "@codemirror/state";
-import { imagePath, todoShortcut, toggleTask } from "@descartes/shared";
+import {
+  breakBeforeHeading,
+  closeFence,
+  continueList,
+  deleteMarker,
+  imagePath,
+  indentItem,
+  markerEnd,
+  todoShortcut,
+  toggleTask,
+  type Span,
+} from "@descartes/shared";
 import {
   Decoration,
   EditorView,
@@ -11,13 +22,15 @@ import {
   type DecorationSet,
   type ViewUpdate,
 } from "@codemirror/view";
-import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import {
-  deleteMarkupBackward,
-  insertNewlineContinueMarkupCommand,
-  markdown,
-  markdownLanguage,
-} from "@codemirror/lang-markdown";
+  defaultKeymap,
+  history,
+  historyKeymap,
+  indentLess,
+  insertNewline,
+  insertTab,
+} from "@codemirror/commands";
+import { deleteMarkupBackward, markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting, syntaxTree } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 
@@ -87,6 +100,40 @@ class BulletMark extends WidgetType {
   }
 }
 const bullet = Decoration.replace({ atomic: true, widget: new BulletMark() });
+/**
+ * Applies a shared edit command (packages/shared/src/edit.ts, mirrored by the Mac app) at the
+ * caret. Return, Backspace and ⌘Return use the same rules as the Mac editor instead of
+ * CodeMirror's own Markdown commands, so both clients behave identically.
+ */
+function sharedCommand(
+  command: (text: string, caret: number) => (Span & { text: string }) | undefined,
+) {
+  return (view: EditorView) => {
+    const { from, to } = view.state.selection.main;
+    if (view.state.readOnly || from !== to || view.state.selection.ranges.length > 1) return false;
+    const previous = view.state.doc.toString();
+    const next = command(previous, from);
+    if (!next) return false;
+    view.dispatch({
+      changes: minimalChange(previous, next.text),
+      selection: { anchor: next.start },
+      userEvent: "input",
+      scrollIntoView: true,
+    });
+    return true;
+  };
+}
+/** ⌘← / Home first stops after a bullet or checkbox, then reaches the line start (as on the Mac). */
+function smartLineStart(view: EditorView) {
+  const range = view.state.selection.main;
+  if (!range.empty) return false;
+  const line = view.state.doc.lineAt(range.head);
+  const end = markerEnd(line.text);
+  const target = view.moveToLineBoundary(range, false);
+  if (end === undefined || target.head !== line.from || range.head <= line.from + end) return false;
+  view.dispatch({ selection: { anchor: line.from + end }, scrollIntoView: true });
+  return true;
+}
 /** Replace only the changed span, so undo history and other selections stay put. */
 function minimalChange(previous: string, next: string) {
   let from = 0,
@@ -350,8 +397,30 @@ export const NoteView = forwardRef<
           EditorView.lineWrapping,
           access.current.of([EditorState.readOnly.of(readOnly), EditorView.editable.of(!readOnly)]),
           keymap.of([
-            { key: "Enter", run: insertNewlineContinueMarkupCommand({ nonTightLists: false }) },
-            { key: "Backspace", run: deleteMarkupBackward },
+            {
+              key: "Enter",
+              run: (view) =>
+                sharedCommand(closeFence)(view) ||
+                sharedCommand(breakBeforeHeading)(view) ||
+                sharedCommand(continueList)(view) ||
+                insertNewline(view),
+            },
+            {
+              key: "Backspace",
+              run: (view) => sharedCommand(deleteMarker)(view) || deleteMarkupBackward(view),
+            },
+            {
+              // List items indent as a whole; elsewhere Tab inserts a tab at the caret.
+              key: "Tab",
+              run: (view) =>
+                sharedCommand((text, caret) => indentItem(text, caret, false))(view) ||
+                insertTab(view),
+              shift: (view) =>
+                sharedCommand((text, caret) => indentItem(text, caret, true))(view) ||
+                indentLess(view),
+            },
+            { key: "Home", run: smartLineStart },
+            { mac: "Cmd-ArrowLeft", run: smartLineStart },
             {
               key: "Mod-Enter",
               run(view) {
@@ -375,7 +444,7 @@ export const NoteView = forwardRef<
             },
           ]),
           markdown({ base: markdownLanguage, addKeymap: false, completeHTMLTags: false }),
-          keymap.of([...historyKeymap, ...defaultKeymap, indentWithTab]),
+          keymap.of([...historyKeymap, ...defaultKeymap]),
           syntaxHighlighting(proseHighlight),
           liveMarkdown,
           noteTheme,
@@ -389,7 +458,7 @@ export const NoteView = forwardRef<
             const absorb = absorbSpaceAt;
             absorbSpaceAt = null;
             if (insert === " " && from === to && from === absorb) return true;
-            if (!/[\]］]$/.test(insert) || view.state.readOnly) return false;
+            if (!/[\]］」]$/.test(insert) || view.state.readOnly) return false;
             const doc = view.state.doc.toString();
             const typed = doc.slice(0, from) + insert + doc.slice(to);
             const caret = from + insert.length;

@@ -8,9 +8,10 @@ export const shortcutHelp = [
   ["⌘F、⌘G / ⌘⇧G", "本文検索、次 / 前の一致"],
   ["⌘⌥[ / ⌘⌥]", "前 / 次の見出し"],
   ["Return", "リストを続ける。空の項目で字下げを戻す / 終了"],
-  ["Tab / ⇧Tab", "リストの字下げ / 戻す"],
+  ["Return（```の後）", "コードブロックを閉じて中に入力"],
+  ["Tab / ⇧Tab", "リストの字下げ / 戻す（それ以外ではタブを入力）"],
   ["⌘Return", "ToDoにする（選択した複数行も） / チェックを切り替える"],
-  ["[]", "行頭で入力するとToDo（- [ ] ）になる"],
+  ["[] / 「」", "行頭で入力するとToDo（- [ ] ）になる"],
   ["⌘B / ⌘I / ⌘⇧`", "太字 / 斜体 / インラインコード"],
   ["⌘L", "リンクを挿入"],
   ["⌘K", "ショートカット一覧"],
@@ -75,6 +76,57 @@ function replace(
 ): Span & { text: string } {
   return { text: text.slice(0, start) + insert + text.slice(end), start: caret, end: caret };
 }
+/**
+ * Return at the end of an opening fence that nothing closes adds the closing fence and puts the
+ * caret inside, so the rest of the note does not become code. Typing that closing fence by hand
+ * right above the added one steps over it instead of doubling it. Mirrors
+ * `NoteText.closeFence` in the Mac app.
+ */
+export function closeFence(text: string, caret: number) {
+  const { start, stop, line: full } = lineAt(text, caret);
+  const line = full.endsWith("\r") ? full.slice(0, -1) : full;
+  if (caret !== start + line.length) return;
+  const newline = text.includes("\r\n") ? "\r\n" : "\n";
+  const fence = new Fence();
+  for (const previous of text.slice(0, start).split("\n")) fence.consumes(previous);
+  const inside = Boolean(fence.delimiter);
+  if (!fence.consumes(line)) return;
+  if (inside) {
+    if (fence.delimiter || stop >= text.length) return;
+    const next = lineAt(text, stop + 1);
+    const nextLine = next.line.endsWith("\r") ? next.line.slice(0, -1) : next.line;
+    if (nextLine.trim() !== line.trim()) return;
+    return replace(text, caret, next.start + nextLine.length, newline, caret + newline.length);
+  }
+  const delimiter = fence.delimiter;
+  if (stop < text.length)
+    for (const rest of text.slice(stop + 1).split("\n")) {
+      fence.consumes(rest);
+      if (!fence.delimiter) return;
+    }
+  const indent = /^[ \t]*/.exec(line)![0];
+  return replace(
+    text,
+    caret,
+    caret,
+    newline + newline + indent + delimiter,
+    caret + newline.length,
+  );
+}
+/**
+ * Return at the start of a heading's text inserts an empty line above the heading instead of
+ * splitting "## " from its text (as Return does at the start of an item). Not on the title line.
+ * Mirrors `NoteText.breakBeforeHeading` in the Mac app.
+ */
+export function breakBeforeHeading(text: string, caret: number) {
+  const { start, line } = lineAt(text, caret);
+  const level = /^#{1,6} /.exec(line)?.[0].length;
+  if (!level || start === 0 || caret !== start + level || !line.slice(level).replace(/\r$/, ""))
+    return;
+  if (fenced(text, start, line)) return;
+  const newline = text.slice(start - 2, start) === "\r\n" ? "\r\n" : "\n";
+  return replace(text, start, start, newline, caret + newline.length);
+}
 export function continueList(text: string, caret: number) {
   const { start, line } = lineAt(text, caret);
   const item = listLine(line);
@@ -83,6 +135,23 @@ export function continueList(text: string, caret: number) {
   if (item.length === line.length && item.indent) return indentItem(text, caret, true);
   if (item.length === line.length) return replace(text, start, start + item.length, "", start);
   return replace(text, caret, caret, "\n" + item.next, caret + 1 + item.next.length);
+}
+/** A bullet ("- ") or task ("- [ ] ") marker, which both editors show as one dot/checkbox. */
+const styledMarker = /^([ \t]*)([-*+] \[[ xX]\] |[-*+] )/;
+/** Where the text of a bullet/task item starts, for ⌘← / Home ("smart home"). */
+export function markerEnd(line: string) {
+  const match = styledMarker.exec(line);
+  return match ? match[0].length : undefined;
+}
+/**
+ * Backspace directly after a bullet or checkbox removes the whole marker in one step (the Mac
+ * app's atomic markers). Indentation stays. Not inside fenced code.
+ */
+export function deleteMarker(text: string, caret: number) {
+  const { start, line } = lineAt(text, caret);
+  const match = styledMarker.exec(line);
+  if (!match || caret !== start + match[0].length || fenced(text, start, line)) return;
+  return replace(text, start + match[1].length, caret, "", start + match[1].length);
 }
 export function indentItem(text: string, caret: number, outdent: boolean) {
   const { start, line } = lineAt(text, caret);
@@ -251,14 +320,14 @@ export function toggleTask(
   };
 }
 /**
- * "[]" (or full-width "［］") typed at the start of a line or bullet becomes "- [ ] ". `caret` is
+ * "[]" (or "［］", or the Japanese IME's "「」") typed at the start of a line or bullet becomes "- [ ] ". `caret` is
  * just after the typed bracket. When nothing separates it from following text, the caller should
  * absorb one space typed next, so "- [] 牛乳" also gives "- [ ] 牛乳". Mirrors the Mac app.
  */
 export function todoShortcut(text: string, caret: number) {
   const start = text.lastIndexOf("\n", caret - 1) + 1;
   const before = text.slice(start, caret);
-  const match = /^([ \t]*)(?:([-*+])[ \t]+)?(?:\[\]|［］)$/.exec(before);
+  const match = /^([ \t]*)(?:([-*+])[ \t]+)?(?:\[\]|［］|「」)$/.exec(before);
   if (!match || fenced(text, start, before)) return;
   const separated = text[caret] === " " || text[caret] === "\t";
   const insert = match[1] + (match[2] ?? "-") + (separated ? " [ ]" : " [ ] ");
