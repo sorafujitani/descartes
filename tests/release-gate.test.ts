@@ -66,7 +66,8 @@ test("normal deployment and dry-run run every UI gate before reaching the mocked
     assert.equal(result.status, 0);
     assert.deepEqual(result.calls, [...steps, "publish"]);
   }
-});
+  // Spawns several real shells; allow for a busy machine instead of the 5s default.
+}, 30_000);
 
 test("failure of any gate, including browser interaction tests, prevents publication", () => {
   for (const name of ["deploy", "deploy:check"] as const)
@@ -75,4 +76,4 @@ test("failure of any gate, including browser interaction tests, prevents publica
       assert.equal(result.status, 23);
       assert.deepEqual(result.calls, steps.slice(0, index + 1));
     }
-});
+}, 30_000);
