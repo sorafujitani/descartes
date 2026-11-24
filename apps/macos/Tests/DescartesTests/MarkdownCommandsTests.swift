@@ -212,7 +212,13 @@ final class MarkdownCommandsTests: XCTestCase {
       view.textStorage?.attribute(.foregroundColor, at: open.location, effectiveRange: nil)
         as? NSColor, Theme.text)
     XCTAssertEqual(view.codeBlocks.count, 1)
-    // While editing, fences stay visible but muted; read-only preview hides them.
+    // Fences are hidden away from the caret, muted on the caret's line, hidden in preview.
+    XCTAssertEqual(
+      view.textStorage?.attribute(
+        .foregroundColor, at: raw.range(of: "```").location, effectiveRange: nil)
+        as? NSColor, NSColor.clear)
+    view.setSelectedRange(NSRange(location: raw.range(of: "```js").location + 5, length: 0))
+    coord.style(view)
     XCTAssertEqual(
       view.textStorage?.attribute(
         .foregroundColor, at: raw.range(of: "```").location, effectiveRange: nil)

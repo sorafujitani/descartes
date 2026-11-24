@@ -99,11 +99,20 @@ export function closeFence(text: string, caret: number) {
     return replace(text, caret, next.start + nextLine.length, newline, caret + newline.length);
   }
   const delimiter = fence.delimiter;
+  // Is this fence the opener of a block that already exists below? Only if the text below, read
+  // on its own, ends with a fence left open (this block's closer). Otherwise the text below is
+  // self-contained, and pairing with the next block's opener would swallow the text in between.
+  let closed = false;
+  const alone = new Fence();
   if (stop < text.length)
     for (const rest of text.slice(stop + 1).split("\n")) {
-      fence.consumes(rest);
-      if (!fence.delimiter) return;
+      alone.consumes(rest);
+      if (!closed) {
+        fence.consumes(rest);
+        if (!fence.delimiter) closed = true;
+      }
     }
+  if (closed && alone.delimiter) return;
   const indent = /^[ \t]*/.exec(line)![0];
   return replace(
     text,

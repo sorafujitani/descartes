@@ -39,6 +39,7 @@ import XCTest
     container.lineFragmentPadding = 0
     view.textContainerInset = NSSize(width: 21, height: 10)
     view.isRichText = false
+    view.drawsBackground = false
     view.allowsUndo = true
     view.isAutomaticQuoteSubstitutionEnabled = false
     view.isAutomaticDashSubstitutionEnabled = false
@@ -193,7 +194,7 @@ import XCTest
     // Incremental styling must be indistinguishable from styling the whole document again.
     let fresh = Scenario.styled(
       view.string, source: coordinator.source, preview: coordinator.preview,
-      zoom: coordinator.zoom)
+      zoom: coordinator.zoom, selection: selection)
     if let expected = fresh.textStorage, !storage.isEqual(to: expected) {
       var at = 0
       while at < storage.length {
@@ -214,13 +215,17 @@ import XCTest
       fail("code blocks \(view.codeBlocks) vs \(fresh.codeBlocks)")
     }
   }
-  static func styled(_ markdown: String, source: Bool, preview: Bool, zoom: Int) -> NoteText {
+  /// A fresh full styling, with the same selection (fences on the caret's line are shown).
+  static func styled(
+    _ markdown: String, source: Bool, preview: Bool, zoom: Int, selection: NSRange
+  ) -> NoteText {
     let view = NoteText(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
     let coordinator = Editor.Coordinator(Notebook(demo: true))
     coordinator.source = source
     coordinator.preview = preview
     coordinator.zoom = zoom
     view.string = markdown
+    view.setSelectedRange(selection)
     coordinator.style(view)
     return view
   }
@@ -331,6 +336,35 @@ final class EditorScenarioTests: XCTestCase {
     s.type("`")
     s.expect("# T\n```\ncode\n```\nafter")
   }
+  @MainActor func testFencesShowOnlyOnTheCaretLine() {
+    let s = Scenario("# T\n```js\nconsole.log(1)\n```\n後")
+    func shown(_ marker: String, after: Bool = false) -> Bool {
+      let raw = s.text as NSString
+      let range = after ? raw.range(of: marker, options: .backwards) : raw.range(of: marker)
+      let color = s.view.textStorage?.attribute(
+        .foregroundColor, at: range.location, effectiveRange: nil)
+      return color as? NSColor != NSColor.clear
+    }
+    XCTAssertFalse(shown("```js"))
+    XCTAssertFalse(shown("```", after: true))
+    // Arrowing onto a fence shows just that fence (check() verifies the caret line is visible).
+    s.key("up")
+    XCTAssertTrue(shown("```", after: true))
+    XCTAssertFalse(shown("```js"))
+    s.key("up").key("up")
+    XCTAssertTrue(shown("```js"))
+    XCTAssertFalse(shown("```", after: true))
+    // Editing the language on the fence line keeps it visible; leaving hides it again.
+    s.key("end").key("backspace").key("backspace").type("swift")
+    s.expect("# T\n```swift\nconsole.log(1)\n```\n後")
+    s.key("down")
+    XCTAssertFalse(shown("```swift"))
+    // A selection across the block shows both fences.
+    s.select(4, (s.text as NSString).range(of: "後").location - 4)
+    XCTAssertTrue(shown("```swift"))
+    XCTAssertTrue(shown("```", after: true))
+  }
+
   @MainActor func testReturnOnAnOpeningFenceClosesTheBlock() {
     // Return after ``` (or ```lang / ~~~) adds the closing fence and puts the caret inside,
     // so the rest of the note does not turn into code.

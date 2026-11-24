@@ -215,6 +215,28 @@ function taskDecorations(view: EditorView): DecorationSet {
                 widget: new RepositoryImage(name, image[1]),
               }).range(node.from, node.to),
             );
+        } else if (node.name === "FencedCode") {
+          // A code block shows as one panel. Its fences (and the language) are hidden unless the
+          // caret is on that line, as in the Mac app; the Markdown itself is unchanged.
+          const first = view.state.doc.lineAt(node.from);
+          const last = view.state.doc.lineAt(node.to);
+          const closes = last.number > first.number && /^\s*(`{3,}|~{3,})\s*$/.test(last.text);
+          for (let number = first.number; number <= last.number; number++) {
+            const line = view.state.doc.line(number);
+            const fence = number === first.number || (number === last.number && closes);
+            const editingLine =
+              view.hasFocus &&
+              view.state.selection.ranges.some(
+                (range) => range.from <= line.to && range.to >= line.from,
+              );
+            const classes = ["cm-code-line"];
+            if (number === first.number) classes.push("cm-code-first");
+            if (number === last.number) classes.push("cm-code-last");
+            if (fence) classes.push(editingLine ? "cm-code-fence" : "cm-fence-hidden");
+            ranges.push(Decoration.line({ class: classes.join(" ") }).range(line.from));
+            if (fence && !editingLine && line.to > line.from)
+              ranges.push(Decoration.replace({}).range(line.from, line.to));
+          }
         } else if (node.name === "HeaderMark") {
           const line = view.state.doc.lineAt(node.from);
           const editingLine =
@@ -330,6 +352,15 @@ const noteTheme = EditorView.theme({
     borderRadius: "50%",
     backgroundColor: "var(--color-text-muted)",
   },
+  ".cm-code-line": {
+    backgroundColor: "var(--color-code-bg)",
+    padding: "0 1rem",
+    fontFamily: "var(--font-code)",
+  },
+  ".cm-code-first": { borderTopLeftRadius: "8px", borderTopRightRadius: "8px" },
+  ".cm-code-last": { borderBottomLeftRadius: "8px", borderBottomRightRadius: "8px" },
+  ".cm-code-fence": { color: "var(--color-text-muted)", fontSize: "0.85em" },
+  ".cm-fence-hidden": { fontSize: "0", lineHeight: "0.75rem", padding: "0 1rem" },
   ".cm-completed-task": { color: "var(--color-text-muted)", textDecoration: "line-through" },
   ".cm-note-image": { maxWidth: "min(100%, 320px)", maxHeight: "240px", verticalAlign: "middle" },
 });

@@ -489,6 +489,40 @@ struct Editor: NSViewRepresentable {
         return
       }
       if !styleEditedLine(view) { style(view) }
+      syncFences(view)
+    }
+    func textViewDidChangeSelection(_ notification: Notification) {
+      guard let view = notification.object as? NoteText else { return }
+      syncFences(view)
+    }
+    /// Fences (```` ``` ````, the language and the closing fence) are shown only while the caret
+    /// or selection is on that line, so you can still edit them; otherwise only the block shows.
+    private func revealsFence(_ line: StyledLine, in view: NoteText) -> Bool {
+      let selection = view.selectedRange()
+      return selection.location <= line.range.location + line.contentLength
+        && NSMaxRange(selection) >= line.range.location
+    }
+    private func isFence(_ line: StyledLine) -> Bool {
+      line.code && (line.fenceBefore == nil || line.fenceAfter == nil) && line.contentLength > 0
+    }
+    /// Shows or hides the fence lines whose state no longer matches the caret. Only those lines
+    /// are restyled; `lastStyledLineCount` keeps describing the last edit.
+    func syncFences(_ view: NoteText) {
+      guard !source, !preview, styledView === view, cacheValid, pendingEditCount == 0,
+        !view.hasMarkedText(), styledConfiguration == configuration,
+        let storage = view.textStorage, storage.length == styledLength
+      else { return }
+      let stale = lines.filter { line in
+        guard isFence(line) else { return false }
+        let shown =
+          storage.attribute(.foregroundColor, at: line.range.location, effectiveRange: nil)
+          as? NSColor != NSColor.clear
+        return shown != revealsFence(line, in: view)
+      }
+      guard !stale.isEmpty else { return }
+      let count = lastStyledLineCount
+      restyle(stale, in: view)
+      lastStyledLineCount = count
     }
     private func styleInline(_ line: String, at: Int, in storage: NSTextStorage) {
       if !source, line.contains("://") {
@@ -552,7 +586,7 @@ struct Editor: NSViewRepresentable {
 
     }
     private func styleFence(
-      _ range: NSRange, opened: Bool, closed: Bool, in storage: NSTextStorage
+      _ range: NSRange, opened: Bool, closed: Bool, revealed: Bool, in storage: NSTextStorage
     ) {
       storage.removeAttribute(NoteText.uniformLine, range: range)
       if source {
@@ -567,8 +601,9 @@ struct Editor: NSViewRepresentable {
       body.tailIndent = -16 * scale
       if opened || closed {
         if closed { body.paragraphSpacing = 12 * scale }
-        if preview {
-          // Read-only preview shows only the block; the delimiters become thin padding.
+        if preview || !revealed {
+          // Away from the caret (and always in preview) only the block shows; the delimiters
+          // become thin padding.
           body.minimumLineHeight = 16 * scale
           storage.addAttributes(
             [
@@ -577,8 +612,8 @@ struct Editor: NSViewRepresentable {
             ], range: range)
           return
         }
-        // While editing, the fences (and the language after ```) stay visible but quiet.
-        // Hiding them made a typed ``` vanish and everything typed after it invisible.
+        // On the caret's line the fence (and the language after ```) is visible but quiet, so
+        // what you type there is never hidden.
         body.minimumLineHeight = 20 * scale
         storage.addAttributes(
           [
@@ -717,7 +752,7 @@ struct Editor: NSViewRepresentable {
       } else if record.code {
         styleFence(
           prose.range, opened: record.fenceBefore == nil, closed: record.fenceAfter == nil,
-          in: storage)
+          revealed: revealsFence(record, in: view), in: storage)
       } else {
         styleProse(
           prose, paragraph: paragraph, storage: storage, view: view, marker: marker)
@@ -819,6 +854,10 @@ struct Editor: NSViewRepresentable {
       }
       let targets = lines.filter { $0.imageName == name }
       guard !targets.isEmpty else { return }
+      restyle(targets, in: view)
+    }
+    private func restyle(_ targets: [StyledLine], in view: NoteText) {
+      guard let storage = view.textStorage else { return }
       let raw = storage.string as NSString
       let (paragraph, normal) = baseStyle()
       lastStyledLineCount = 0

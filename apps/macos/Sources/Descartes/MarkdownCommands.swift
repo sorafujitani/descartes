@@ -170,15 +170,20 @@ extension NoteText {
       return true
     }
     guard let delimiter = fence.delimiter else { return false }
+    // Is this fence the opener of a block that already exists below? Only if the text below,
+    // read on its own, ends with a fence left open (this block's closer). Otherwise the text
+    // below is self-contained (e.g. a paragraph and a complete block), and pairing with the next
+    // block's opener would swallow everything in between into code.
     var closed = false
-    raw.substring(from: NSMaxRange(range)).enumerateLines { line, stop in
-      _ = fence.consumes(line[...])
-      if fence.delimiter == nil {
-        closed = true
-        stop = true
+    var alone = Fence()
+    raw.substring(from: NSMaxRange(range)).enumerateLines { line, _ in
+      _ = alone.consumes(line[...])
+      if !closed {
+        _ = fence.consumes(line[...])
+        if fence.delimiter == nil { closed = true }
       }
     }
-    guard !closed else { return false }
+    guard !(closed && alone.delimiter != nil) else { return false }
     let indent = line.prefix(while: { $0 == " " || $0 == "\t" })
     let newline = lineBreak
     insertText(newline + newline + indent + delimiter, replacementRange: selectedRange())

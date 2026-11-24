@@ -199,6 +199,25 @@
       "doc": "# T\n",
       "keys": "「」牛乳{return}{return}「引用」",
       "expect": "# T\n- [ ] 牛乳\n「引用」"
+    },
+    {
+      "name": "a new code block above a paragraph and another block stays separate",
+      "doc": "# T\n\n- test\n```\nconsole.log(test)\n```",
+      "caret": {
+        "after": "# T\n"
+      },
+      "keys": "```js{return}x",
+      "expect": "# T\n```js\nx\n```\n- test\n```\nconsole.log(test)\n```",
+      "caretAfter": "x"
+    },
+    {
+      "name": "a new code block between two blocks stays separate",
+      "doc": "# T\n```\na\n```\n\n本文\n```\nb\n```",
+      "caret": {
+        "after": "a\n```\n"
+      },
+      "keys": "```{return}c",
+      "expect": "# T\n```\na\n```\n```\nc\n```\n本文\n```\nb\n```"
     }
   ]
 }

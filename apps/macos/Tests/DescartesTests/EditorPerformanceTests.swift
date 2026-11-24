@@ -5,7 +5,8 @@ import XCTest
 
 final class EditorPerformanceTests: XCTestCase {
   @MainActor private func editor(
-    _ markdown: String, source: Bool = false, preview: Bool = false, zoom: Int = 10
+    _ markdown: String, source: Bool = false, preview: Bool = false, zoom: Int = 10,
+    selection: NSRange? = nil
   ) -> (NoteText, Editor.Coordinator) {
     _ = NSApplication.shared
     let view = NoteText(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
@@ -14,6 +15,7 @@ final class EditorPerformanceTests: XCTestCase {
     coordinator.preview = preview
     coordinator.zoom = zoom
     view.string = markdown
+    if let selection { view.setSelectedRange(selection) }
     view.delegate = coordinator
     coordinator.style(view)
     return (view, coordinator)
@@ -24,7 +26,8 @@ final class EditorPerformanceTests: XCTestCase {
     file: StaticString = #filePath, line: UInt = #line
   ) throws {
     let (expected, _) = editor(
-      view.string, source: coordinator.source, preview: coordinator.preview, zoom: coordinator.zoom)
+      view.string, source: coordinator.source, preview: coordinator.preview, zoom: coordinator.zoom,
+      selection: view.selectedRange())
     let actualStorage = try XCTUnwrap(view.textStorage, file: file, line: line)
     let expectedStorage = try XCTUnwrap(expected.textStorage, file: file, line: line)
     XCTAssertTrue(actualStorage.isEqual(to: expectedStorage), file: file, line: line)

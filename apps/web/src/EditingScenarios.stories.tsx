@@ -92,3 +92,32 @@ export const SharedScenarios: StoryObj<typeof meta> = {
     await expect(failures).toEqual([]);
   },
 };
+
+/** Fences are hidden away from the caret and shown on its line, like the Mac app. */
+export const CodeBlockFences: StoryObj<typeof meta> = {
+  play: async ({ canvasElement, userEvent }) => {
+    const dom = await waitFor(() => {
+      const editor = canvasElement.querySelector<HTMLElement>(".cm-editor");
+      if (!editor) throw new Error("editor not mounted");
+      return editor;
+    });
+    const view = EditorView.findFromDOM(dom)!;
+    const doc = "# T\n```js\nconsole.log(1)\n```\n後";
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: doc } });
+    view.focus();
+    view.dispatch({ selection: { anchor: doc.length } });
+    const content = () => dom.querySelector(".cm-content")!.textContent ?? "";
+    await waitFor(() => expect(content()).not.toContain("```"));
+    await expect(content()).toContain("console.log(1)");
+    await expect(dom.querySelectorAll(".cm-code-line")).toHaveLength(3);
+    // On the fence's line it is visible and editable.
+    await userEvent.keyboard("{ArrowUp}");
+    await waitFor(() => expect(content()).toContain("```"));
+    await expect(content()).not.toContain("```js");
+    await userEvent.keyboard("{ArrowUp}{ArrowUp}");
+    await waitFor(() => expect(content()).toContain("```js"));
+    await userEvent.keyboard("{End}{Backspace}{Backspace}ts{ArrowDown}");
+    await waitFor(() => expect(content()).not.toContain("```"));
+    await expect(view.state.doc.toString()).toBe("# T\n```ts\nconsole.log(1)\n```\n後");
+  },
+};
