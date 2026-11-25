@@ -507,6 +507,35 @@ struct Editor: NSViewRepresentable {
       }
       pendingEditCount += 1
       pendingEdit = .init(range: editedRange, delta: delta)
+      if let view = styledView {
+        shiftDrawing(of: view, for: editedRange, delta: delta, in: textStorage)
+      }
+    }
+    /// Keeps markers and code-block backgrounds attached to their text on every character edit.
+    /// Restyling is deferred while the IME composes (and full restyles rebuild everything), so
+    /// without this, Japanese input drew later checkboxes at their old offsets inside the text
+    /// being composed. `range` is the edited range in the new text.
+    private func shiftDrawing(
+      of view: NoteText, for range: NSRange, delta: Int, in storage: NSTextStorage
+    ) {
+      let start = range.location
+      let oldEnd = NSMaxRange(range) - delta
+      let oldLength = storage.length - delta
+      view.decorations = view.decorations.compactMap { decoration in
+        if decoration.at >= oldEnd { return .init(at: decoration.at + delta, mark: decoration.mark) }
+        return decoration.at < start ? decoration : nil
+      }
+      view.codeBlocks = view.codeBlocks.map { block in
+        if block.location >= oldEnd {
+          return .init(location: block.location + delta, length: block.length)
+        }
+        let end = NSMaxRange(block)
+        // An edit within the block (or appended to an unclosed block at the end of the note).
+        if start >= block.location, oldEnd <= end, start < end || end == oldLength {
+          return .init(location: block.location, length: max(0, block.length + delta))
+        }
+        return block
+      }
     }
     func textDidChange(_ notification: Notification) {
       guard let view = notification.object as? NoteText else { return }
@@ -869,21 +898,9 @@ struct Editor: NSViewRepresentable {
       let (paragraph, normal) = baseStyle()
       lastStyledLineCount = 0
       storage.beginEditing()
-      view.decorations = view.decorations.compactMap { decoration in
-        if NSLocationInRange(decoration.at, old.range) { return nil }
-        return .init(
-          at: decoration.at >= NSMaxRange(old.range) ? decoration.at + edit.delta : decoration.at,
-          mark: decoration.mark)
-      }
-      view.codeBlocks = view.codeBlocks.map { block in
-        if block.location >= NSMaxRange(old.range) {
-          return .init(location: block.location + edit.delta, length: block.length)
-        }
-        if NSLocationInRange(old.range.location, block) {
-          return .init(location: block.location, length: block.length + edit.delta)
-        }
-        return block
-      }
+      // Markers and blocks were already shifted as the edit happened (shiftDrawing); only the
+      // edited line's markers are rebuilt here.
+      view.decorations.removeAll { NSLocationInRange($0.at, range) }
       storage.setAttributes(normal, range: range)
       styleLine(prose, record: updated, paragraph: paragraph, storage: storage, view: view)
       view.decorations.sort { $0.at < $1.at }

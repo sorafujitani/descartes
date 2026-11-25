@@ -202,7 +202,24 @@ import XCTest
       }
       index += 1
     }
-    guard !view.hasMarkedText() else { return }
+    if view.hasMarkedText() {
+      // Styling waits for the composition to be committed, but markers and code blocks on other
+      // lines must already be drawn where a full restyle would put them.
+      let composing = raw.lineRange(for: view.markedRange())
+      let fresh = Scenario.styled(
+        view.string, source: coordinator.source, preview: coordinator.preview,
+        zoom: coordinator.zoom, selection: selection)
+      let mine = view.decorations.map(\.at).filter { !NSLocationInRange($0, composing) }
+      let theirs = fresh.decorations.map(\.at).filter { !NSLocationInRange($0, composing) }
+      if mine != theirs { fail("markers during composition \(mine) vs \(theirs)") }
+      let blocks = { (blocks: [NSRange]) in
+        blocks.filter { NSIntersectionRange($0, composing).length == 0 }
+      }
+      if blocks(view.codeBlocks) != blocks(fresh.codeBlocks) {
+        fail("code blocks during composition \(view.codeBlocks) vs \(fresh.codeBlocks)")
+      }
+      return
+    }
     // Incremental styling must be indistinguishable from styling the whole document again.
     let fresh = Scenario.styled(
       view.string, source: coordinator.source, preview: coordinator.preview,
@@ -558,6 +575,19 @@ final class EditorScenarioTests: XCTestCase {
     s.key("undo")
     s.expect("# T\n- [ ] 牛乳\n- [ ] 卵\n- [x] パン")
   }
+  @MainActor func testComposingANewTodoBetweenTodosKeepsLaterCheckboxesInPlace() {
+    // Return after the first todo, then Japanese input: the later checkboxes must not be drawn
+    // inside the text being composed (they were drawn at their old offsets until commit).
+    let s = Scenario("# T\n- [ ] base-web 画像\n- [ ] lean 全部読む\n- [ ] 本を読む\n```\ncode\n```")
+    s.caret(after: "画像").key("return")
+    s.compose(["い", "いち", "いちご"], commit: "苺")
+    s.expect("# T\n- [ ] base-web 画像\n- [ ] 苺\n- [ ] lean 全部読む\n- [ ] 本を読む\n```\ncode\n```")
+    // Composing in the middle of an existing todo and at the start of the next one.
+    s.caret(after: "全部").compose(["よ", "よん"], commit: "四")
+    s.caret(after: "- [ ] 本").select(s.caret - 1).compose(["え", "えほ", "えほん"], commit: "絵")
+    s.expect("# T\n- [ ] base-web 画像\n- [ ] 苺\n- [ ] lean 全部四読む\n- [ ] 絵本を読む\n```\ncode\n```")
+  }
+
   @MainActor func testJapaneseInputOnEmptyItemsAndHeadings() {
     let s = Scenario()
     s.type("- ").compose(["ぎ", "ぎゅ", "ぎゅう"], commit: "牛").type("\n")
