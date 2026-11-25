@@ -147,7 +147,7 @@ private extension Result where Failure == Error {
     return view
   }
 
-  /// Pushes the notebook's state to the page: a newly opened note, preview/source mode, zoom
+  /// Pushes the notebook's state to the page: a newly opened note, source mode, zoom
   /// and focus requests.
   func sync() {
     guard ready, let book else { return }
@@ -156,7 +156,7 @@ private extension Result where Failure == Error {
       call("load", book.text, book.base == nil ? 2 : 0)
     }
     let options: [String: AnyHashable] = [
-      "readOnly": book.preview || book.busy, "raw": book.source && !book.preview,
+      "readOnly": book.busy, "raw": book.source,
       "zoom": book.zoom,
     ]
     if options != shownOptions {

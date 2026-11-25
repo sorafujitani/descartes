@@ -19,7 +19,7 @@ No GitHub, Cloudflare, Access session, private notes or secrets are needed.
 
 - App: one integrated document editor, natural typing/Enter, explicit save,
   checkbox persistence, new document and list error.
-- DocumentList: title/full-text search, selection, empty/loading/error states.
+- NotePalette: the ⌘P note switcher — recent notes first, title/full-text search, keyboard selection, empty and error states.
 - Markdown: paragraphs, headings, nested bullets, numbered lists, tasks, code,
   quote, inline formatting, links and table; checkbox and row interaction.
 - NoteView: one accessible document textbox, typing, checkbox interaction and Return-to-continue/exit task lists.

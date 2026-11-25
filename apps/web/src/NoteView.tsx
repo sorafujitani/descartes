@@ -293,6 +293,20 @@ class RepositoryImage extends WidgetType {
     return true;
   }
 }
+/** "タイトル" shown in an empty first line, so a new note asks for its title. */
+class TitlePlaceholder extends WidgetType {
+  eq(other: WidgetType) {
+    return other instanceof TitlePlaceholder;
+  }
+  toDOM() {
+    const hint = document.createElement("span");
+    hint.className = "cm-title-placeholder";
+    hint.textContent = "タイトル";
+    hint.setAttribute("aria-hidden", "true");
+    return hint;
+  }
+}
+const titlePlaceholder = Decoration.widget({ widget: new TitlePlaceholder(), side: 1 });
 const hiddenMark = Decoration.replace({});
 const inlineCode = Decoration.mark({ class: "cm-inline-code" });
 const linkLabel = Decoration.mark({ class: "cm-link-label" });
@@ -303,6 +317,8 @@ function taskDecorations(view: EditorView): DecorationSet {
   const editing = (from: number, to: number) =>
     view.hasFocus &&
     view.state.selection.ranges.some((range) => range.from <= to && range.to >= from);
+  const first = view.state.doc.line(1);
+  if (/^#[ \t]*$/.test(first.text)) ranges.push(titlePlaceholder.range(first.to));
   for (const visible of view.visibleRanges)
     syntaxTree(view.state).iterate({
       from: visible.from,
@@ -626,6 +642,11 @@ const noteTheme = EditorView.theme(
     ".cm-code-fence": { color: "var(--color-text-muted)", fontSize: "0.85em" },
     ".cm-fence-hidden": { fontSize: "0", lineHeight: "0.75rem", padding: "0 1rem" },
     ".cm-quote": { color: "var(--color-text-muted)" },
+    ".cm-title-placeholder": {
+      color: "var(--color-text-muted)",
+      opacity: "0.6",
+      pointerEvents: "none",
+    },
     ".cm-ordered": { display: "inline-block", textIndent: "0", whiteSpace: "pre" },
     ".cm-ordered-1": { width: "1.45rem" },
     ".cm-ordered-2": { width: "1.95rem" },

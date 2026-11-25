@@ -22,7 +22,6 @@ import SwiftUI
   {
     didSet { UserDefaults.standard.set(zoom, forKey: "noteZoomTenths") }
   }
-  @Published var preview = false
   @Published var source = false
   @Published var focusRequest = 0
   /// Blocking work (loading, switching documents). Saving never blocks typing.
@@ -86,7 +85,6 @@ import SwiftUI
     paused = false
     base = document
     text = document?.markdown ?? "# "
-    preview = false
     focusRequest += 1
     revision += 1
     UserDefaults.standard.set(document?.id.uuidString, forKey: lastKey)

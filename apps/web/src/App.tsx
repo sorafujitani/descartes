@@ -1,15 +1,6 @@
-import {
-  lazy,
-  Suspense,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type CSSProperties,
-} from "react";
-import { DocumentList } from "./DocumentList";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { NotePalette, recentNotes, rememberNote } from "./NotePalette";
 import { NoteView, type NoteViewHandle } from "./NoteView";
-const Markdown = lazy(() => import("./Markdown").then((module) => ({ default: module.Markdown })));
 import { useDocuments } from "./useDocuments";
 import {
   client,
@@ -21,7 +12,6 @@ import {
   messageOf,
   shortcutHelp,
   toggleTask,
-  toggleTaskAt,
   titleOf,
   wrapSelection,
   ApiError,
@@ -41,31 +31,31 @@ export const autosaveTiming = { idle: 4_000, max: 45_000, retry: 30_000 };
 const untitled = "1行目に「# タイトル」を入力してください。";
 export function App({
   api = defaultApi,
-  initialId = defaultId,
+  initialId: requestedId,
 }: {
   api?: ReturnType<typeof client>;
+  /** A note to open; `null` starts a new one. Unset: ?doc=, or else the most recent note. */
   initialId?: string | null;
 }) {
+  const [initialId] = useState(() =>
+    requestedId !== undefined ? requestedId : (defaultId ?? recentNotes()[0] ?? null),
+  );
   const { docs, loading: listing, error: listError, revision, upsert } = useDocuments(api);
   const [current, setCurrent] = useState<Document>(),
-    [text, setText] = useState(blank),
-    [editing, setEditing] = useState(false);
+    [text, setText] = useState(blank);
   const [busy, setBusy] = useState(Boolean(initialId)),
-    [saving, setSaving] = useState(false),
-    [error, setError] = useState(""),
-    [notice, setNotice] = useState("");
+    [error, setError] = useState("");
+  const [picking, setPicking] = useState(false);
   const operation = useRef(Boolean(initialId));
   const latestText = useRef(text);
   latestText.current = text;
   /** Incremented whenever another document is shown, so late save responses cannot apply to it. */
   const session = useRef(0);
   /** A conflict stops autosave until an explicit save succeeds or another document is opened. */
-  const [paused, setPaused] = useState(false);
   const pausedRef = useRef(false);
   const upload = useRef<HTMLInputElement>(null);
   const area = useRef<NoteViewHandle>(null);
   const [noteSession, setNoteSession] = useState(0);
-  const search = useRef<HTMLInputElement>(null);
   const finder = useRef<HTMLInputElement>(null);
   const help = useRef<HTMLDialogElement>(null);
   const pending = useRef<Span | null>(null);
@@ -83,11 +73,17 @@ export function App({
       .get(initialId, controller.signal)
       .then((doc) => {
         if (controller.signal.aborted) return;
+        currentRef.current = doc;
+        latestText.current = doc.markdown;
         setCurrent(doc);
         setText(doc.markdown);
+        setNoteSession((value) => value + 1);
+        rememberNote(doc.id);
       })
       .catch((error) => {
-        if (!controller.signal.aborted) setError(messageOf(error));
+        // A remembered note that was deleted elsewhere just leaves a new note open.
+        if (!controller.signal.aborted && initialId === (requestedId ?? defaultId))
+          setError(messageOf(error));
       })
       .finally(() => {
         if (!controller.signal.aborted) {
@@ -114,7 +110,6 @@ export function App({
     operation.current = true;
     setBusy(true);
     setError("");
-    setNotice("");
     try {
       await fn();
       return true;
@@ -127,16 +122,14 @@ export function App({
     }
   }, []);
   const select = useCallback((doc?: Document) => {
-    setPreview(false);
     currentRef.current = doc;
+    if (doc) rememberNote(doc.id);
     latestText.current = doc?.markdown ?? blank;
     session.current++;
     pausedRef.current = false;
-    setPaused(false);
     setNoteSession((session) => session + 1);
     setCurrent(doc);
     setText(doc?.markdown ?? blank);
-    setEditing(!doc);
     try {
       const url = new URL(location.href);
       if (doc) url.searchParams.set("doc", doc.id);
@@ -159,7 +152,7 @@ export function App({
     },
     [run, select],
   );
-  /** Explicit save (⌘S / 保存). It also retries after a conflict or a failed autosave. */
+  /** ⌘S saves now (otherwise autosave does). It also retries after a conflict or a failure. */
   async function save() {
     if (operation.current || !unsaved()) return;
     if (!titleOf(latestText.current)) {
@@ -167,10 +160,7 @@ export function App({
       return;
     }
     pausedRef.current = false;
-    setPaused(false);
-    if (!(await flush())) return;
-    if (latestText.current === currentRef.current?.markdown) setEditing(false);
-    setNotice(unsaved() ? "保存しました。続きの変更は未保存です。" : "保存しました。");
+    await flush();
   }
   async function attach(file?: File) {
     if (!file) return;
@@ -178,10 +168,8 @@ export function App({
       if (file.size > 4 * 1024 * 1024) throw new Error("画像は4 MiB以下にしてください。");
       const { path } = await api.attach(file);
       setText((t) => t + "\n\n![スクリーンショット](" + path + ")\n");
-      setNotice("画像を追加しました。");
     });
   }
-  const [preview, setPreview] = useState(false);
   const currentRef = useRef(current);
   currentRef.current = current;
   const writing = useRef<{ draft: string; again: boolean; promise: Promise<boolean> } | null>(null);
@@ -205,7 +193,6 @@ export function App({
     if (!unsaved()) return Promise.resolve(true);
     const state = { draft: latestText.current, again: false, promise: Promise.resolve(true) };
     writing.current = state;
-    setSaving(true);
     state.promise = (async () => {
       const owner = session.current;
       try {
@@ -219,6 +206,7 @@ export function App({
           const doc = await api.save(draft, base, { keepalive });
           keepalive = false;
           upsert(doc);
+          rememberNote(doc.id);
           if (owner !== session.current) return true;
           currentRef.current = doc;
           // The response acknowledges only the submitted snapshot, never newer keystrokes.
@@ -239,12 +227,14 @@ export function App({
         if (error instanceof ApiError && error.status === 409) {
           // Retrying cannot resolve a conflict; keep the draft and wait for the user.
           pausedRef.current = true;
-          setPaused(true);
+          setError(
+            messageOf(error) +
+              " 自動保存を止めています。内容を控えてから開き直すか、⌘S で上書きを再試行してください。",
+          );
         } else schedule(autosaveTiming.retry);
         return false;
       } finally {
         writing.current = null;
-        setSaving(false);
       }
     })();
     return state.promise;
@@ -290,7 +280,6 @@ export function App({
   function updateNote(next: string, persist = false) {
     latestText.current = next;
     setText(next);
-    setNotice("");
     if (!persist) return;
     void flush();
   }
@@ -309,13 +298,6 @@ export function App({
       setText(next.text);
     }
     function jump(forward: boolean) {
-      if (preview) {
-        const heads = [...document.querySelectorAll(".sora-prose :is(h1, h2, h3, h4, h5, h6)")];
-        const current = heads.findIndex((node) => node.getBoundingClientRect().top >= 80);
-        const node = heads[forward ? Math.max(current, 0) : current - 1];
-        node?.scrollIntoView({ block: "center" });
-        return;
-      }
       const field = area.current;
       if (!field) return;
       const caret = headingCaret(field.value, field.selectionStart, forward);
@@ -325,18 +307,7 @@ export function App({
     }
     function find(forward: boolean) {
       const field = area.current;
-      if (preview || !field) {
-        const page = window as Window & {
-          find?: (
-            query: string,
-            caseSensitive: boolean,
-            backwards: boolean,
-            wrap: boolean,
-          ) => boolean;
-        };
-        page.find?.(query, false, !forward, true);
-        return;
-      }
+      if (!field) return;
       const from = forward ? field.selectionEnd : field.selectionStart;
       const match = findMatch(field.value, query, from, forward);
       if (!match) return;
@@ -348,47 +319,36 @@ export function App({
       const action = actionFor(event);
       if (!action || busy || event.isComposing) return;
       const target = event.target;
-      const typingSearch = target === search.current;
       const typingFind = target === finder.current;
+      // Inputs inside the note switcher and help handle their own keys.
+      if (target instanceof Element && target.closest("dialog")) return;
       if (target instanceof Element && target.closest(".note") && !event.metaKey && !event.ctrlKey)
         return;
-      if (typingSearch && !event.metaKey && !event.ctrlKey) return;
       if (typingFind && action === "continue") {
         event.preventDefault();
         find(true);
         return;
       }
-      if (
-        (typingSearch || typingFind) &&
-        (action === "continue" || action === "indent" || action === "outdent")
-      )
+      if (typingFind && (action === "continue" || action === "indent" || action === "outdent"))
         return;
       const field = area.current;
       const span = { start: field?.selectionStart ?? 0, end: field?.selectionEnd ?? 0 };
       const body = field?.value ?? text;
       if (action === "new") {
         event.preventDefault();
-        setPreview(false);
         switchTo();
       } else if (action === "save") {
         event.preventDefault();
         void save();
       } else if (action === "search") {
         event.preventDefault();
-        search.current?.focus();
-      } else if (action === "preview") {
-        event.preventDefault();
-        setPreview((value) => !value);
-        if (preview) requestAnimationFrame(() => area.current?.focus());
+        setPicking(true);
       } else if (action === "help") {
         event.preventDefault();
         help.current?.showModal();
       } else if (action === "edit") {
         event.preventDefault();
-        if (preview) {
-          setPreview(false);
-          requestAnimationFrame(() => area.current?.focus());
-        } else if (field) edit(wrapSelection(body, span, "`"));
+        if (field) edit(wrapSelection(body, span, "`"));
       } else if (action === "find") {
         event.preventDefault();
         setFinding(true);
@@ -406,7 +366,7 @@ export function App({
       } else if (action === "heading-prev" || action === "heading-next") {
         event.preventDefault();
         jump(action === "heading-next");
-      } else if (!field || preview) {
+      } else if (!field) {
         return;
       } else if (action === "continue") {
         const next = continueList(body, span.start);
@@ -440,119 +400,151 @@ export function App({
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [busy, current, editing, preview, query, save, switchTo, text]);
-  const status = busy
-    ? "読み書きしています…"
-    : saving
-      ? "保存しています…"
-      : notice ||
-        (!dirty
-          ? ""
-          : paused
-            ? "自動保存を停止しています。内容を控えてから開き直すか、⌘S で再試行してください。"
-            : !titleOf(text)
-              ? "1行目に「# タイトル」を書くと自動保存します。"
-              : "未保存の変更があります（自動保存します）。");
+  }, [busy, current, query, save, switchTo, text]);
+  const title = titleOf(text);
+  useEffect(() => {
+    document.title = title ? title + " — Descartes" : "Descartes";
+  }, [title]);
   return (
     <>
-      <header>
-        <b>Descartes</b>
-        <button type="button" onClick={() => help.current?.showModal()}>
-          ショートカット
+      <header className="topbar">
+        <button
+          type="button"
+          className="note-switcher"
+          aria-label="ノート一覧"
+          title="ノート一覧 (⌘P)"
+          onClick={() => setPicking(true)}
+        >
+          <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16">
+            <path
+              d="M2 3.5h12M2 8h12M2 12.5h8"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+            />
+          </svg>
+          <span className="note-title">{title || "新規ノート"}</span>
         </button>
-      </header>
-      <main>
-        <DocumentList
-          api={api}
-          docs={docs}
-          currentId={current?.id}
-          busy={busy}
-          loading={listing}
-          error={listError}
-          revision={revision}
-          searchRef={search}
-          onSelect={switchTo}
-        />
-        <section aria-label="文書">
-          <div role="status">{status}</div>
-          {error && <p role="alert">{error}</p>}
-          {editing || current ? (
-            <>
-              <div className="bar">
-                <button disabled={busy} onClick={() => upload.current?.click()}>
-                  画像を添付
-                </button>
-                <input
-                  hidden
-                  ref={upload}
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp"
-                  onChange={(e) => {
-                    void attach(e.target.files?.[0]);
-                    e.target.value = "";
-                  }}
-                />
-                <button
-                  disabled={busy || !dirty}
-                  title="自動保存されます。今すぐ保存するときは ⌘S"
-                  onClick={() => void save()}
-                >
-                  保存
-                </button>
-                <button disabled={busy} onClick={() => setPreview((value) => !value)}>
-                  {preview ? "本文に戻る" : "プレビュー"}
-                </button>
-                {dirty && (
-                  <button
-                    disabled={busy}
-                    onClick={() => {
-                      if (confirm("変更を破棄しますか？")) setText(current?.markdown ?? blank);
-                    }}
-                  >
-                    元に戻す
-                  </button>
-                )}
-              </div>
-              <div className="sheet" style={{ "--note-zoom": zoom / 10 } as CSSProperties}>
-                <div hidden={preview}>
-                  <NoteView
-                    key={noteSession}
-                    ref={area}
-                    markdown={text}
-                    onChange={updateNote}
-                    readOnly={busy}
-                    focusAt={editing && !current ? 2 : null}
-                  />
-                </div>
-                {preview && (
-                  <Suspense fallback={<p role="status">表示を準備しています…</p>}>
-                    <Markdown
-                      source={text}
-                      documentKey={String(noteSession)}
-                      onToggleTask={(index) => {
-                        const next = toggleTaskAt(latestText.current, index);
-                        if (next !== undefined) updateNote(next, true);
-                      }}
-                    />
-                  </Suspense>
-                )}
-              </div>
-              {finding && (
-                <input
-                  ref={finder}
-                  type="search"
-                  aria-label="本文検索"
-                  placeholder="本文を検索"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                />
-              )}
-            </>
-          ) : (
-            <p>文書を選ぶか、新規作成してください。</p>
+        <div className="topbar-actions">
+          {finding && (
+            <input
+              ref={finder}
+              type="search"
+              aria-label="本文検索"
+              placeholder="本文を検索"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  setFinding(false);
+                  area.current?.focus();
+                }
+              }}
+            />
           )}
-        </section>
+          <button
+            type="button"
+            className="icon"
+            aria-label="新規ノート"
+            title="新規ノート (⌘N)"
+            disabled={busy}
+            onClick={() => switchTo()}
+          >
+            <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16">
+              <path
+                d="M8 3v10M3 8h10"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className="icon"
+            aria-label="画像を添付"
+            title="画像を添付"
+            disabled={busy}
+            onClick={() => upload.current?.click()}
+          >
+            <svg aria-hidden="true" viewBox="0 0 16 16" width="16" height="16">
+              <rect
+                x="2"
+                y="3"
+                width="12"
+                height="10"
+                rx="1.5"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.3"
+              />
+              <path
+                d="M3.5 11.5l3-3 2 2 1.5-1.5 2.5 2.5"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.3"
+                strokeLinejoin="round"
+              />
+              <circle cx="10.5" cy="6" r="1" fill="currentColor" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className="icon"
+            aria-label="ショートカット"
+            title="ショートカット (⌘K)"
+            onClick={() => help.current?.showModal()}
+          >
+            ?
+          </button>
+        </div>
+        <input
+          hidden
+          ref={upload}
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          onChange={(e) => {
+            void attach(e.target.files?.[0]);
+            e.target.value = "";
+          }}
+        />
+      </header>
+      <main className="page">
+        <div className="sheet" style={{ "--note-zoom": zoom / 10 } as CSSProperties}>
+          <NoteView
+            key={noteSession}
+            ref={area}
+            markdown={text}
+            onChange={updateNote}
+            readOnly={busy}
+            focusAt={!current && !busy ? 2 : null}
+          />
+        </div>
       </main>
+      {error && (
+        <div className="toast" role="alert">
+          <span>{error}</span>
+          <button type="button" aria-label="閉じる" onClick={() => setError("")}>
+            ×
+          </button>
+        </div>
+      )}
+      <NotePalette
+        api={api}
+        docs={docs}
+        currentId={current?.id}
+        open={picking}
+        loading={listing}
+        error={listError}
+        revision={revision}
+        onClose={() => {
+          setPicking(false);
+          requestAnimationFrame(() => area.current?.focus());
+        }}
+        onSelect={switchTo}
+      />
       <dialog ref={help} aria-label="ショートカット">
         <h2>ショートカット</h2>
         <ul>

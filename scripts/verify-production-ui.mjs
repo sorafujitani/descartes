@@ -27,7 +27,6 @@ const mime = {
   ".html": "text/html",
   ".js": "text/javascript",
   ".css": "text/css",
-  ".wasm": "application/wasm",
   ".png": "image/png",
   ".svg": "image/svg+xml",
   ".webmanifest": "application/manifest+json",
@@ -113,7 +112,9 @@ try {
     const textSaved = page.waitForResponse(
       (response) => response.request().method() === "PUT" && response.status() === 200,
     );
-    await page.getByRole("button", { name: "保存", exact: true }).click();
+    // There is no save button: autosave runs after a pause; ⌘S saves at once.
+    assert.equal(await page.getByRole("button", { name: "保存", exact: true }).count(), 0);
+    await editor.press("ControlOrMeta+s");
     await textSaved;
     assert.ok(
       saves.at(-1)?.endsWith("\nupdated"),

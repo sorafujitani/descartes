@@ -2,7 +2,6 @@ export type Action =
   | "new"
   | "save"
   | "search"
-  | "preview"
   | "edit"
   | "help"
   | "find"
@@ -27,7 +26,6 @@ export function actionFor(event: KeyboardEvent): Action | null {
   if (event.isComposing || event.key === "Process") return null;
   const meta = event.metaKey || event.ctrlKey;
   const key = event.key;
-  if (meta && event.shiftKey && key.toLowerCase() === "p") return "preview";
   if (meta && event.altKey && key === "[") return "heading-prev";
   if (meta && event.altKey && key === "]") return "heading-next";
   if (meta && event.shiftKey && key === "`") return "code";

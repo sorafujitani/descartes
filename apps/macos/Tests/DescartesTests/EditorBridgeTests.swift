@@ -89,17 +89,18 @@ final class EditorBridgeTests: XCTestCase {
     XCTAssertTrue(book.dirty)
   }
 
-  @MainActor func testPreviewSourceZoomAndNewNotes() async throws {
+  @MainActor func testReadOnlySourceZoomAndNewNotes() async throws {
     try XCTSkipIf(EditorScheme.bundledRoot() == nil, "Run pnpm test:macos to build the editor.")
     let editor = try await EditorHarness("# T\n- [ ] 牛乳")
     let book = editor.book
-    book.preview = true
+    // Read-only while the notebook is busy (loading or switching notes).
+    book.busy = true
     book.editor.sync()
     try await editor.until("read-only") {
       try await editor.js("document.querySelector('.cm-content').contentEditable") as? String
         == "false"
     }
-    book.preview = false
+    book.busy = false
     book.source = true
     book.zoom = 15
     book.editor.sync()

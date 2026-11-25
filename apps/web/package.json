@@ -19,9 +19,7 @@
     "@codemirror/view": "6.43.15",
     "@descartes/shared": "workspace:*",
     "@lezer/highlight": "^1.2.5",
-    "@ox-content/wasm": "^3.8.3",
     "@sorafujitani/document-design-system": "https://codeload.github.com/sorafujitani/document-design-system/tar.gz/7993d6b97ce133468735f4b2a83f6a049eafe94a",
-    "dompurify": "^3.4.18",
     "react": "19.3.1",
     "react-dom": "19.3.1"
   },

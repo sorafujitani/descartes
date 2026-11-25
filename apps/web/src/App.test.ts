@@ -6,23 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { client, type Document } from "@descartes/shared";
 import { EditorView } from "@codemirror/view";
 import { App, autosaveTiming } from "./App";
-import { DocumentList } from "./DocumentList";
-
-vi.mock("./Markdown", () => ({
-  Markdown: ({
-    source,
-    onToggleTask,
-  }: {
-    source: string;
-    onToggleTask?: (index: number) => void;
-  }) =>
-    createElement(
-      "article",
-      {},
-      source,
-      onToggleTask && createElement("button", { onClick: () => onToggleTask(0) }, "チェック切替"),
-    ),
-}));
+import { NotePalette } from "./NotePalette";
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 // jsdom has no layout API. Geometry is asserted separately by the real Chromium Storybook suite.
 if (!Range.prototype.getClientRects)
@@ -38,6 +22,7 @@ afterEach(async () => {
   });
   host?.remove();
   root = undefined;
+  localStorage.clear();
   vi.useRealTimers();
 });
 function deferred<T>() {
@@ -56,13 +41,21 @@ async function mount(element: ReturnType<typeof createElement>) {
   });
 }
 function button(label: string) {
-  const node = [...host.querySelectorAll("button")].find((node) => node.textContent === label);
+  const node = [...host.querySelectorAll("button")].find(
+    (node) => node.textContent === label || node.getAttribute("aria-label") === label,
+  );
   assert.ok(node, `Missing button: ${label}`);
   return node;
 }
 async function click(label: string) {
   await act(async () => {
     button(label).click();
+  });
+}
+/** ⌘S: there is no save button; autosave runs after a pause and ⌘S saves at once. */
+async function saveNow() {
+  await act(async () => {
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "s", metaKey: true, bubbles: true }));
   });
 }
 async function input(node: HTMLTextAreaElement | HTMLInputElement, value: string) {
@@ -104,7 +97,8 @@ test("selected document opens without waiting for the title index", async () => 
   assert.equal(editor().state.doc.toString(), saved.markdown);
   assert.equal(host.querySelectorAll('[role="textbox"][aria-label="Markdown本文"]').length, 1);
   assert.equal(host.querySelector('[aria-label="項目を追加"], [aria-label="本文を追加"]'), null);
-  assert.match(host.textContent!, /文書一覧を読み込み中/);
+  // Loading the list shows no status text (the note itself is already editable).
+  assert.equal(host.querySelector('[role="status"]'), null);
   await act(async () => {
     list.resolve(Response.json({ items: [], next: null }));
   });
@@ -142,7 +136,7 @@ test("saving allows typing, preserves later edits, uses the acknowledged SHA, an
     return Response.json({ ...saved, markdown: "# Draft\nLater", sha: "2".repeat(40) });
   });
   await mount(createElement(App, { api, initialId: null }));
-  await click("新規作成");
+  await click("新規ノート");
   await inputDocument(saved.markdown);
   await act(async () => {
     for (let i = 0; i < 2; i++)
@@ -157,9 +151,8 @@ test("saving allows typing, preserves later edits, uses the acknowledged SHA, an
     gate.resolve(Response.json(saved));
   });
   assert.equal(editor().state.doc.toString(), "# Draft\nLater");
-  assert.equal(button("保存").disabled, false);
-  assert.match(host.textContent!, /続きの変更は未保存/);
-  await click("保存");
+  assert.equal(host.querySelector('[role="status"]'), null);
+  await saveNow();
   assert.equal(requests.length, 2);
   assert.equal(requests[1].method, "PUT");
   assert.equal(new URL(requests[1].url).pathname, "/api/docs/" + saved.id);
@@ -173,11 +166,10 @@ test("a conflict never clears the draft and the editor can retry", async () => {
       : Response.json({ items: [], next: null }),
   );
   await mount(createElement(App, { api, initialId: null }));
-  await click("新規作成");
+  await click("新規ノート");
   await inputDocument("# Unsaved\n本文");
-  await click("保存");
+  await saveNow();
   assert.equal(editor().state.doc.toString(), "# Unsaved\n本文");
-  assert.equal(button("保存").disabled, false);
   assert.match(host.querySelector('[role="alert"]')!.textContent!, /競合/);
 });
 
@@ -187,14 +179,16 @@ test("a late title page cannot replace a locally saved title", async () => {
     init?.method === "POST" ? Response.json(saved) : list.promise,
   );
   await mount(createElement(App, { api, initialId: null }));
-  await click("新規作成");
+  await click("新規ノート");
   await inputDocument(saved.markdown);
-  await click("保存");
+  await saveNow();
   await act(async () => {
     list.resolve(Response.json({ items: [{ id: saved.id, title: "Old title" }], next: null }));
   });
-  assert.equal(button("Draft").textContent, "Draft");
-  assert.equal(host.querySelector("aside")!.textContent!.includes("Old title"), false);
+  await click("ノート一覧");
+  const palette = host.querySelector(".palette")!;
+  assert.match(palette.textContent!, /Draft/);
+  assert.equal(palette.textContent!.includes("Old title"), false);
 });
 
 test("rapid task changes serialize writes using the latest acknowledged SHA", async () => {
@@ -228,7 +222,6 @@ test("rapid task changes serialize writes using the latest acknowledged SHA", as
   assert.equal(requests.length, 2);
   assert.deepEqual(await requests[1].json(), { markdown: latest, sha: "2".repeat(40) });
   assert.equal(editor().state.sliceDoc(), latest);
-  assert.equal(button("保存").disabled, true);
 });
 
 test("live task editing preserves CRLF and full-document formatting", async () => {
@@ -273,13 +266,13 @@ test("full-text search debounces input and ignores a stale response even when tr
     return response.promise;
   });
   await mount(
-    createElement(DocumentList, {
+    createElement(NotePalette, {
       api,
       docs: [],
-      busy: false,
+      open: true,
       loading: false,
       error: "",
-      searchRef: { current: null },
+      onClose() {},
       onSelect() {},
     }),
   );
@@ -362,12 +355,11 @@ test("typing autosaves once after a pause, coalescing every keystroke into one c
     await advance(1_000);
   }
   assert.equal(writes.length, 0);
-  assert.match(host.textContent!, /自動保存します/);
+  assert.equal(host.querySelector('[role="status"]'), null, "no 'unsaved' status text");
   await advance(autosaveTiming.idle);
   assert.equal(writes.length, 1);
   assert.equal(writes[0].request.method, "PUT");
   assert.deepEqual(writes[0].body, { markdown: "# Draft\nabc", sha: saved.sha });
-  assert.equal(button("保存").disabled, true);
   await advance(autosaveTiming.max * 2);
   assert.equal(writes.length, 1, "a saved note is not written again");
 });
@@ -391,11 +383,12 @@ test("an untitled draft is not autosaved", async () => {
   fakeTimers();
   const { api, writes } = recordingApi();
   await mount(createElement(App, { api, initialId: null }));
-  await click("新規作成");
+  await click("新規ノート");
   await inputDocument("# \n本文だけ");
   await advance(autosaveTiming.max * 2);
   assert.equal(writes.length, 0);
-  assert.match(host.textContent!, /タイトル」を書くと自動保存/);
+  // The empty title line asks for a title instead of a status message.
+  assert.ok(host.querySelector(".cm-title-placeholder"));
 });
 
 test("a conflict stops autosave until an explicit save", async () => {
@@ -413,9 +406,9 @@ test("a conflict stops autosave until an explicit save", async () => {
   await advance(autosaveTiming.max * 2);
   assert.equal(writes.length, 1, "autosave does not retry a conflict");
   assert.equal(editor().state.sliceDoc(), "# Draft\nlocal more");
-  assert.match(host.textContent!, /自動保存を停止/);
+  assert.match(host.querySelector('[role="alert"]')!.textContent!, /自動保存を止めています/);
   conflict = false;
-  await click("保存");
+  await saveNow();
   assert.equal(writes.length, 2);
   assert.equal(host.querySelector('[role="alert"]'), null);
   await inputDocument("# Draft\nresumed");
@@ -436,7 +429,6 @@ test("a failed autosave is retried later", async () => {
   down = false;
   await advance(autosaveTiming.retry);
   assert.equal(writes.length, 2);
-  assert.equal(button("保存").disabled, true);
 });
 
 test("switching documents saves first instead of asking to discard", async () => {
@@ -444,7 +436,7 @@ test("switching documents saves first instead of asking to discard", async () =>
   const { api, writes } = recordingApi();
   await mount(createElement(App, { api, initialId: saved.id }));
   await inputDocument("# Draft\nunsaved");
-  await click("新規作成");
+  await click("新規ノート");
   assert.equal(confirm.mock.calls.length, 0);
   assert.equal(writes.length, 1);
   assert.equal(writes[0].body.markdown, "# Draft\nunsaved");

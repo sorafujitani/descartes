@@ -21,7 +21,6 @@ struct NoteWindow: View {
             Image(systemName: "checklist")
           }
           .help("ToDoにする／チェックを切り替える (⌘Return)").accessibilityLabel("ToDoにする")
-          .disabled(book.preview)
           Button(action: showActions) { Image(systemName: "command") }
             .help("操作とショートカット (⌘K)").accessibilityLabel("操作とショートカット")
           Button {
@@ -38,13 +37,6 @@ struct NoteWindow: View {
             }.padding().frame(width: 230).background(GlassSurface()).tint(
               Color(nsColor: Theme.accent))
           }
-          if book.dirty {
-            Button {
-              book.save()
-            } label: {
-              Image(systemName: "square.and.arrow.down")
-            }.help("今すぐ保存 (⌘S) · 入力が止まると自動保存します").accessibilityLabel("保存")
-          }
           Button {
             book.browse()
           } label: {
@@ -55,32 +47,22 @@ struct NoteWindow: View {
           } label: {
             Image(systemName: "plus")
           }.help("新規 (⌘N)").accessibilityLabel("新規")
-        }.padding(.trailing, 14).opacity(hovering || book.dirty ? 1 : 0.45).disabled(book.busy)
+        }.padding(.trailing, 14).opacity(hovering ? 1 : 0.45).disabled(book.busy)
       }.frame(height: 38).onHover { hovering = $0 }
       Editor(book: book).frame(
         maxWidth: .infinity, maxHeight: .infinity)
       HStack {
+        // Only problems are shown (a failed save, a conflict); saving and loading are silent.
         Text(
-          book.busy
-            ? "通信中…"
-            : book.saving
-              ? "保存中…"
-              : !book.message.isEmpty
-                ? book.message
-                : book.preview
-                  ? "プレビュー · ⌘E で編集"
-                  : !book.dirty
-                    ? ""
-                    : book.paused
-                      ? "自動保存を停止中 · 内容を控えて開き直すか ⌘S で再試行"
-                      : book.title.isEmpty ? "1行目に「# タイトル」を書くと自動保存します" : "未保存 · 自動保存します"
+          !book.message.isEmpty
+            ? book.message
+            : book.paused ? "自動保存を停止中 · 内容を控えて開き直すか ⌘S で再試行" : ""
         )
         .lineLimit(2).help(book.message).frame(maxWidth: .infinity, alignment: .leading)
         Text("\(book.text.count) characters").monospacedDigit().foregroundStyle(.secondary)
         HStack {
           Spacer()
           Button {
-            book.preview = false
             book.source.toggle()
           } label: {
             Image(systemName: book.source ? "textformat" : "textformat.size")
@@ -128,22 +110,7 @@ struct NoteWindow: View {
   @objc func newNote() { book.new() }
   @objc func searchNotes() { book.browse() }
   @objc func saveNote() { book.save() }
-  @objc func togglePreview() {
-    guard !book.picking else { return }
-    book.preview.toggle()
-  }
-  @objc func editBody() {
-    guard !book.picking else { return }
-    book.preview = false
-    book.focusRequest += 1
-  }
-  @objc func codeOrEdit() {
-    if book.preview {
-      editBody()
-    } else {
-      book.editor.run("code")
-    }
-  }
+  @objc func codeOrEdit() { book.editor.run("code") }
   /// Editing commands run in the editor page; when it has focus, its own shortcuts handle the
   /// keys first and these menu items serve mouse use and the ⌘K panel.
   @objc func editorCommand(_ sender: NSMenuItem) {
@@ -177,7 +144,7 @@ struct NoteWindow: View {
       "[] / 「」：行頭や箇条書きの後に入力するとToDo（- [ ] ）になる",
       "Return（```の後）：コードブロックを閉じて中に入力",
       "Return（見出しの先頭）：見出しの上に空行を入れる",
-      "チェックボックスをクリック：チェックを切り替える（プレビュー中も可）",
+      "チェックボックスをクリック：チェックを切り替える",
       "⌘←：箇条書き・チェックの直後へ、もう一度で行頭へ",
       "選択して * _ ` ~ [：選択した文字を記号で囲む（[ はリンク）",
       "URLを選択した文字に貼り付け：リンク [文字](URL) にする",
@@ -241,10 +208,8 @@ struct NoteWindow: View {
       item.representedObject = action
     }
     let note = submenu("Note")
-    note.addItem(withTitle: "プレビューと編集を切り替える", action: #selector(togglePreview), keyEquivalent: "P")
-      .target = self
     note.addItem(
-      withTitle: "インラインコード（プレビュー中は編集に戻る）", action: #selector(codeOrEdit), keyEquivalent: "e"
+      withTitle: "インラインコード", action: #selector(codeOrEdit), keyEquivalent: "e"
     ).target = self
     let up = String(Character(UnicodeScalar(NSUpArrowFunctionKey)!))
     let down = String(Character(UnicodeScalar(NSDownArrowFunctionKey)!))
