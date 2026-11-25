@@ -1,5 +1,5 @@
 {
-  "about": "Editing scenarios typed into the real CodeMirror editor (apps/web/src/EditingScenarios.stories.tsx) in Chromium and in WebKit, the engine of the Mac app's WKWebView editor. `caret` is an index or {\"after\": text}; `select` selects the first occurrence of a text. `keys` is typed character by character; {return} {tab} {backtab} {backspace} {left} {right} {up} {down} {home} {end} {cmd-return} {alt-up} {alt-down} {cmd-b} {cmd-i} {cmd-l} {cmd-shift-x} are keys and {paste:TEXT} pastes TEXT. `expect` is the Markdown and `caretAfter` the text just before the final caret.",
+  "about": "Editing scenarios typed into the real CodeMirror editor (apps/web/src/EditingScenarios.stories.tsx) in Chromium and in WebKit, the engine of the Mac app's WKWebView editor. `caret` is an index or {\"after\": text}; `select` selects the first occurrence of a text. `keys` is typed character by character; {return} {tab} {backtab} {backspace} {left} {right} {up} {down} {home} {end} {cmd-return} {alt-up} {alt-down} {cmd-b} {cmd-i} {cmd-l} {cmd-shift-x} {cmd-backspace} {shift-return} {delete} {undo} are keys and {paste:TEXT} pastes TEXT. `expect` is the Markdown and `caretAfter` the text just before the final caret.",
   "scenarios": [
     {
       "name": "type a whole code block, closing fence included",
@@ -331,6 +331,126 @@
       "select": "サイト",
       "keys": "{cmd-l}https://e.com",
       "expect": "# T\n[サイト](https://e.com)"
+    },
+    {
+      "name": "command-b again removes bold (selection inside or around)",
+      "doc": "# T\n**太字** と **強調**",
+      "select": "太字",
+      "keys": "{cmd-b}",
+      "expect": "# T\n太字 と **強調**"
+    },
+    {
+      "name": "command-b on a selection including the asterisks removes them",
+      "doc": "# T\n**太字**",
+      "select": "**太字**",
+      "keys": "{cmd-b}",
+      "expect": "# T\n太字"
+    },
+    {
+      "name": "command-i on bold text adds italics, again removes them",
+      "doc": "# T\n**太字**",
+      "select": "太字",
+      "keys": "{cmd-i}",
+      "expect": "# T\n***太字***"
+    },
+    {
+      "name": "delete at the end of an item joins the next item's text",
+      "doc": "# T\n- [ ] 牛乳\n- [x] 卵\n1. 一\n2. 二",
+      "caret": {
+        "after": "牛乳"
+      },
+      "keys": "{delete}",
+      "expect": "# T\n- [ ] 牛乳卵\n1. 一\n2. 二",
+      "caretAfter": "牛乳"
+    },
+    {
+      "name": "delete joins a numbered item without its number",
+      "doc": "# T\n1. 一\n2. 二",
+      "caret": {
+        "after": "一"
+      },
+      "keys": "{delete}",
+      "expect": "# T\n1. 一二"
+    },
+    {
+      "name": "return in a code block keeps the indentation",
+      "doc": "# T\n```\n  if a {\n```",
+      "caret": {
+        "after": "if a {"
+      },
+      "keys": "{return}b",
+      "expect": "# T\n```\n  if a {\n  b\n```"
+    },
+    {
+      "name": "undo after [] turns the todo back into the typed brackets",
+      "doc": "# T\n",
+      "keys": "[]{undo}",
+      "expect": "# T\n[]"
+    },
+    {
+      "name": "option-up renumbers a numbered list",
+      "doc": "# T\n1. 一\n2. 二\n3. 三",
+      "caret": {
+        "after": "三"
+      },
+      "keys": "{alt-up}",
+      "expect": "# T\n1. 一\n2. 三\n3. 二",
+      "caretAfter": "2. 三"
+    },
+    {
+      "name": "tab nests a numbered item starting at 1 and renumbers the rest",
+      "doc": "# T\n1. 一\n2. 二\n3. 三",
+      "caret": {
+        "after": "二"
+      },
+      "keys": "{tab}",
+      "expect": "# T\n1. 一\n  1. 二\n2. 三",
+      "caretAfter": "二"
+    },
+    {
+      "name": "shift-tab moves a nested numbered item back into the list",
+      "doc": "# T\n1. 一\n  1. 二\n2. 三",
+      "caret": {
+        "after": "二"
+      },
+      "keys": "{backtab}",
+      "expect": "# T\n1. 一\n2. 二\n3. 三"
+    },
+    {
+      "name": "nested quotes continue and leave one level at a time",
+      "doc": "# T\n> > 引用",
+      "keys": "{return}続き{return}{return}外",
+      "expect": "# T\n> > 引用\n> > 続き\n> 外"
+    },
+    {
+      "name": "lists inside quotes continue",
+      "doc": "# T\n> - [x] 済み",
+      "keys": "{return}次{return}{return}本文",
+      "expect": "# T\n> - [x] 済み\n> - [ ] 次\n> 本文"
+    },
+    {
+      "name": "backspace after a heading marker removes it",
+      "doc": "# T\n## 節",
+      "caret": {
+        "after": "## "
+      },
+      "keys": "{backspace}",
+      "expect": "# T\n節"
+    },
+    {
+      "name": "shift-return stays inside the list item or quote",
+      "doc": "# T\n- [ ] 牛乳\n> 引用",
+      "caret": {
+        "after": "牛乳"
+      },
+      "keys": "{shift-return}2本",
+      "expect": "# T\n- [ ] 牛乳\n  2本\n> 引用"
+    },
+    {
+      "name": "command-backspace deletes back to the checkbox, not past it",
+      "doc": "# T\n- [ ] 牛乳を買う",
+      "keys": "{cmd-backspace}卵",
+      "expect": "# T\n- [ ] 卵"
     }
   ]
 }

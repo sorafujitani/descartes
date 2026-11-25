@@ -67,33 +67,38 @@ With Xcode installed, run `pnpm build:macos`, copy `apps/macos/dist/Descartes.ap
 
 Type directly in the window. Start the first line with `# Title`. **⌘P** finds a document, **⌘N** starts a new one, and edits are autosaved (see [Autosave](#autosave)); **⌘S** commits immediately. Headings and fenced code are styled in place, not converted to HTML. The app remembers the last open document and window frame. A conflicting save retains the unsaved draft and stops autosave; copy it before reopening the latest version. Switching documents, quitting and switching to another app save first; the app asks before discarding only changes that could not be saved.
 
-The web app and the Mac app share the same Markdown editing commands. On the web, press **⌘K** or **ショートカット**. On the Mac, use **⌘K** or the **⌘** button. Completed tasks are muted and struck through in the note view and in preview. Fenced code is shown as a Document Design System code block; its fences (and the language after ` ``` `) are hidden except on the caret's line, where they are muted and editable; read-only preview always hides them. Return after an opening fence adds the closing fence and puts the caret inside, unless the fence opens an existing block below; a new block above other blocks never pairs with their fences. Typing the closing fence by hand steps over the added one. On both clients, **⌘Return** turns plain text, bullets and numbered items (or every selected line) into tasks (`- [ ] `) and otherwise toggles them, and typing `[]` (or `［］`, or the Japanese IME's `「」`) at the start of a line or bullet creates a task. Both show bullets as dots, tasks (including numbered `1. [ ]` tasks) as outlined checkboxes and quotes as a bar with quieter text, with wrapped item text lined up after the marker; Return in an ordered list renumbers the following items, and `~~strikethrough~~` and `_emphasis_` are styled; the command logic lives in `packages/shared/src/edit.ts` and the editor in `apps/web/src/NoteView.tsx`, used unchanged by both clients. On the Mac, the checklist button does the same as ⌘Return, and the Note and Edit menus run the same editor commands.
+The web app and the Mac app share the same Markdown editing commands. On the web, press **⌘K** or **ショートカット**. On the Mac, use **⌘K** or the **⌘** button. Completed tasks are muted and struck through in the note view and in preview. Fenced code is shown as a Document Design System code block; its fences (and the language after ` ``` `) are hidden except on the caret's line, where they are muted and editable; read-only preview always hides them. Return after an opening fence adds the closing fence and puts the caret inside, unless the fence opens an existing block below; a new block above other blocks never pairs with their fences. Typing the closing fence by hand steps over the added one. On both clients, **⌘Return** turns plain text, bullets and numbered items (or every selected line) into tasks (`- [ ] `) and otherwise toggles them, and typing `[]` (or `［］`, or the Japanese IME's `「」`) at the start of a line or bullet creates a task. Both show bullets as dots, tasks (including numbered `1. [ ]` tasks) as outlined checkboxes and quotes as a bar with quieter text, with wrapped item text lined up after the marker; Return in an ordered list renumbers the following items, and `~~strikethrough~~` and `_emphasis_` are styled; inline Markdown (`**`, `*`, `~~`, `` ` ``, link URLs) is hidden except while the caret is inside it (live preview), tables use a monospaced font and `---` shows as a rule; the command logic lives in `packages/shared/src/edit.ts` and the editor in `apps/web/src/NoteView.tsx`, used unchanged by both clients. On the Mac, the checklist button does the same as ⌘Return, and the Note and Edit menus run the same editor commands.
 
 **Keyboard editing** (also listed in the File, Edit and Note menus):
 
-| Keys                                     | Action                                                                          |
-| ---------------------------------------- | ------------------------------------------------------------------------------- |
-| ⌘⇧P / ⌘E                                 | Toggle read-only preview / return from preview to editing                       |
-| ⌘P, ↑↓, Return, Esc                      | Search titles, select, open, dismiss                                            |
-| ⌘F, ⌘G / ⌘⇧G                             | Find in the current note, next / previous match                                 |
-| ⌘⌥[ / ⌘⌥]                                | Previous / next Markdown heading outside fenced code                            |
-| Return                                   | Continue lists, quotes and tasks; an empty item outdents if nested, else exits  |
-| Return after ` ``` `                     | Add the closing fence (if nothing closes the block) and type inside it          |
-| Return at heading text                   | Insert an empty line above the heading instead of splitting `##` from its text  |
-| Tab / ⇧Tab                               | Indent / outdent the current list item; elsewhere Tab inserts a tab             |
-| ⌘Return                                  | Make the line (or every selected line) a task, or toggle its checkbox           |
-| `[]` at a line start                     | Becomes a task (`- [ ] `); a space typed right after it is absorbed             |
-| ⌘← / ←                                   | Stop after a bullet/checkbox first; hidden markers never need extra key presses |
-| ⌘B / ⌘I / ⌘⇧X / ⌘⇧`                      | Wrap the selection in bold, italic, strikethrough or inline code                |
-| `*` `_` `` ` `` `~` `[` over a selection | Wrap it (`~` → `~~`, `[` → link with the caret in its URL)                      |
-| Paste a URL over text                    | Make it a link `[text](url)`                                                    |
-| ⌥↑ / ⌥↓                                  | Move the current or selected lines up / down                                    |
-| ⌘-click a link                           | Open it in the browser                                                          |
-| ⌘L                                       | Insert a Markdown link and select its URL for typing                            |
-| ⌘E (editing)                             | Inline code                                                                     |
-| ⌘K                                       | Show actions and shortcuts; use ↑↓ and Return to execute                        |
-| ⌘+ (or ⌘=), ⌘−, ⌘0                       | Increase, decrease or reset the note zoom (saved between launches)              |
-| ⌫ after a styled marker                  | Remove the entire bullet, checkbox or heading marker in one edit                |
+| Keys                                     | Action                                                                                                |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| ⌘⇧P / ⌘E                                 | Toggle read-only preview / return from preview to editing                                             |
+| ⌘P, ↑↓, Return, Esc                      | Search titles, select, open, dismiss                                                                  |
+| ⌘F, ⌘G / ⌘⇧G                             | Find in the current note, next / previous match                                                       |
+| ⌘⌥[ / ⌘⌥]                                | Previous / next Markdown heading outside fenced code                                                  |
+| Return                                   | Continue lists, (nested) quotes and tasks, renumbering; empty items outdent/exit                      |
+| Return after ` ``` `                     | Add the closing fence (if nothing closes the block) and type inside it                                |
+| Return at heading text                   | Insert an empty line above the heading instead of splitting `##` from its text                        |
+| Tab / ⇧Tab                               | Indent / outdent the list item (nested numbers restart at 1); Tab in code keeps indentation on Return |
+| ⌘Return                                  | Make the line (or every selected line) a task, or toggle its checkbox                                 |
+| `[]` at a line start                     | Becomes a task (`- [ ] `); a space typed right after it is absorbed                                   |
+| ⌘← / ←                                   | Stop after a bullet/checkbox first; hidden markers never need extra key presses                       |
+| ⌘B / ⌘I / ⌘⇧X / ⌘⇧`                      | Toggle bold, italic, strikethrough or inline code on the selection                                    |
+| `*` `_` `` ` `` `~` `[` over a selection | Wrap it (`~` → `~~`, `[` → link with the caret in its URL)                                            |
+| Paste a URL over text                    | Make it a link `[text](url)`                                                                          |
+| ⌥↑ / ⌥↓                                  | Move the current or selected lines up / down (numbered lists are renumbered)                          |
+| ⌘-click a link                           | Open it in the browser                                                                                |
+| ⇧Return                                  | Line break inside the current list item or quote                                                      |
+| Delete at a line end                     | Join the next item's text (without its bullet, checkbox or number)                                    |
+| ⌘Backspace                               | Delete back to the bullet/checkbox, not past it                                                       |
+| ⌫ after `## `                            | Remove the heading marker                                                                             |
+| ⌘Z after `[]` / `「」`                   | Turn the todo back into the typed brackets                                                            |
+| ⌘L                                       | Insert a Markdown link and select its URL for typing                                                  |
+| ⌘E (editing)                             | Inline code                                                                                           |
+| ⌘K                                       | Show actions and shortcuts; use ↑↓ and Return to execute                                              |
+| ⌘+ (or ⌘=), ⌘−, ⌘0                       | Increase, decrease or reset the note zoom (saved between launches)                                    |
+| ⌫ after a styled marker                  | Remove the entire bullet, checkbox or heading marker in one edit                                      |
 
 Standalone notebook image references (PNG, JPEG and WebP) display as images in styled editing and preview. Source mode shows their Markdown. On the Mac, the editor page is served from the app's own `descartes-editor://` scheme with a strict Content-Security-Policy (no network access); note images are fetched by Swift with the Access credentials, only for asset names produced by the attachment endpoint. External URLs are never requested by the editor.
 
@@ -128,6 +133,9 @@ Editing bugs are caught with keystroke scenarios rather than only unit tests of 
 
 - **Shared scenarios** — [`tests/fixtures/editing-scenarios.json`](tests/fixtures/editing-scenarios.json) lists a starting note, caret, keys (`{return}`, `{tab}`, `{cmd-return}`, …) and the expected Markdown/caret. Storybook types them into the real CodeMirror editor (`EditingScenarios.stories.tsx`) in Chromium and in **WebKit**, the engine of the Mac app's WKWebView. Add a scenario for every editing bug fixed.
 - **Mac bridge tests** — `EditorBridgeTests.swift` loads the built editor in a WKWebView and checks that notes, preview/source/zoom and new notes reach the page, typing and menu commands (task, undo, bold, move lines) come back to the notebook, and images load only through the authenticated asset path.
+- **Fuzz tests** — `tests/edit-fuzz.test.ts` runs every shared command on 1,500 generated notes (lists, quotes, code, Japanese, emoji) at random carets/selections: no exceptions, valid positions, only nearby lines change, formatting toggles back and moving lines up/down restores the note.
+- **IME and production checks** — `pnpm test:production` also drives a real Japanese IME composition through Chromium's DevTools protocol (`「」` becomes a todo, the composed text appears once) and checks widgets after re-rendering.
+- **Mac key routing** — `EditorBridgeTests.testShortcutsTypedInTheEditorRunOnce` sends ⌘B/⌘Z/⌘− through the window and menu as AppKit does: page shortcuts run once, other keys still reach the app menu.
 - **Shared command unit tests** — `tests/edit.test.ts` covers `packages/shared/src/edit.ts` (Return, Backspace, ⌘Return, `[]`, fences, CRLF) quickly in `pnpm test`.
 
 ## Architecture and performance verification

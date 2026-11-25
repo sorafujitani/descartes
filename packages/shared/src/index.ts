@@ -12,8 +12,12 @@ export const imagePath = new RegExp("^\\.\\./assets/(" + uuid + "\\.(?:png|jpg|w
 export {
   breakBeforeHeading,
   closeFence,
+  codeIndent,
   continueList,
   deleteMarker,
+  deleteToMarker,
+  joinNextItem,
+  softBreak,
   findMatch,
   headingCaret,
   indentItem,

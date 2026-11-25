@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { EditorSelection } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { expect, waitFor } from "storybook/test";
 import { NoteView } from "./NoteView";
@@ -48,6 +49,10 @@ function keyboard(keys: string, mod: string) {
     "cmd-i": `{${mod}>}i{/${mod}}`,
     "cmd-l": `{${mod}>}l{/${mod}}`,
     "cmd-shift-x": `{${mod}>}{Shift>}x{/Shift}{/${mod}}`,
+    "cmd-backspace": `{${mod}>}{Backspace}{/${mod}}`,
+    "shift-return": "{Shift>}{Enter}{/Shift}",
+    delete: "{Delete}",
+    undo: `{${mod}>}z{/${mod}}`,
     "alt-up": "{Alt>}{ArrowUp}{/Alt}",
     "alt-down": "{Alt>}{ArrowDown}{/Alt}",
   };
@@ -219,5 +224,60 @@ export const WidgetsKeepTheirKind: StoryObj<typeof meta> = {
     await waitFor(() => expect(dom.querySelectorAll(".cm-bullet")).toHaveLength(2));
     await expect(dom.querySelectorAll(".cm-task-checkbox")).toHaveLength(1);
     await expect(dom.querySelectorAll(".cm-quote-bar")).toHaveLength(1);
+  },
+};
+
+/**
+ * Live preview: inline Markdown hides away from the caret and shows while editing it; list and
+ * quote text (including wrapped lines) starts at the same x as the next lines.
+ */
+export const LivePreviewLayout: StoryObj<typeof meta> = {
+  play: async ({ canvasElement }) => {
+    const dom = await waitFor(() => {
+      const editor = canvasElement.querySelector<HTMLElement>(".cm-editor");
+      if (!editor) throw new Error("editor not mounted");
+      return editor;
+    });
+    const view = EditorView.findFromDOM(dom)!;
+    const long = "折り返しを確かめるための長い文章です。".repeat(6);
+    const doc = [
+      "# T",
+      "本文 **太字** と *斜体* と ~~消す~~ と `code` と [リンク](https://example.com/x)",
+      "- [ ] " + long,
+      "- " + long,
+      "1. " + long,
+      "10. " + long,
+      "> " + long,
+      "> > 二重",
+      "---",
+      "末尾",
+    ].join("\n");
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: doc } });
+    view.focus();
+    view.dispatch({ selection: { anchor: doc.length } });
+    const content = () => view.contentDOM.textContent ?? "";
+    await waitFor(() => expect(content()).not.toContain("**"));
+    for (const syntax of ["~~", "`", "](https", "[リンク]"])
+      await expect(content()).not.toContain(syntax);
+    await expect(content()).toContain("リンク");
+    await expect(dom.querySelectorAll(".cm-quote-bar")).toHaveLength(3);
+    await expect(dom.querySelectorAll(".cm-rule")).toHaveLength(1);
+    // Inside **太字** the marks are shown for editing.
+    view.dispatch({ selection: { anchor: doc.indexOf("太字") + 1 } });
+    await waitFor(() => expect(content()).toContain("**太字**"));
+    view.dispatch({ selection: { anchor: doc.length } });
+    // First and wrapped lines of every item start at the same x (the marker is outside).
+    for (const prefix of ["- [ ] ", "- ", "1. ", "10. ", "> "]) {
+      const line = view.state.doc.line(doc.split("\n").findIndex((l) => l === prefix + long) + 1);
+      const first = view.coordsAtPos(line.from + prefix.length, 1)!;
+      const last = view.coordsAtPos(line.to, -1)!;
+      await expect(last.top).toBeGreaterThan(first.bottom - 1); // it really wraps
+      // The start of the line containing the end: the wrapped line's left edge.
+      const wrapped = view.coordsAtPos(
+        view.moveToLineBoundary(EditorSelection.cursor(line.to), false).head,
+        1,
+      )!;
+      await expect(Math.abs(wrapped.left - first.left)).toBeLessThan(1.5);
+    }
   },
 };

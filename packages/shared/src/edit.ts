@@ -15,7 +15,10 @@ export const shortcutHelp = [
   ["⌘B / ⌘I / ⌘⇧X / ⌘⇧`", "太字 / 斜体 / 取り消し線 / インラインコード"],
   ["選択して * _ ` ~ [", "選択した文字を記号で囲む（[ はリンク）"],
   ["URLを選択文字に貼り付け", "リンク [文字](URL) にする"],
-  ["⌥↑ / ⌥↓", "行を上 / 下へ移動"],
+  ["⌥↑ / ⌥↓", "行を上 / 下へ移動（番号は振り直し）"],
+  ["⇧Return", "リスト項目・引用の中で改行"],
+  ["行末で Delete", "次の項目の本文をつなげる（記号は消す）"],
+  ["⌘B などをもう一度", "書式を外す"],
   ["⌘クリック", "リンクを開く"],
   ["⌘L", "リンクを挿入"],
   ["⌘K", "ショートカット一覧"],
@@ -54,21 +57,39 @@ function fenced(text: string, start: number, line: string) {
   for (const previous of text.slice(0, start).split("\n")) fence.consumes(previous);
   return fence.consumes(line);
 }
-const listPattern = /^([ \t]*)([-*+]|[0-9]{1,9}[.)]|>)(?:[ \t]+(\[[ xX]\])?)?[ \t]*/;
-function listLine(line: string) {
-  const match = listPattern.exec(line);
-  if (!match) return;
-  const markerEnd = match[1].length + match[2].length;
-  if (markerEnd < line.length && line[markerEnd] !== " " && line[markerEnd] !== "\t") return;
-  const marker = match[2];
-  const number = /^(\d+)([.)])$/.exec(marker);
+/**
+ * A list or quote line: quote prefix ("> ", "> > "), indentation, optional marker ("-", "1.")
+ * and optional checkbox. `length` is where its text starts.
+ */
+const listPattern =
+  /^((?:[ \t]*>[ \t]?)*)([ \t]*)(?:([-*+]|[0-9]{1,9}[.)])(?=[ \t]|$)(?:[ \t]+(\[[ xX]\])(?=[ \t]|$))?)?[ \t]*/;
+type ListLine = {
+  length: number;
+  quote: string;
+  indent: string;
+  marker?: string;
+  task: boolean;
+  next: string;
+};
+function listLine(line: string): ListLine | undefined {
+  const match = listPattern.exec(line)!;
+  const [, quote, indent, marker, box] = match;
+  if (!quote && !marker) return;
+  const number = marker && /^(\d+)([.)])$/.exec(marker);
+  const quoted = quote && !/[ \t]$/.test(quote) ? quote + " " : quote;
   return {
     length: match[0].length,
-    indent: match[1],
+    quote,
+    indent,
+    marker,
+    task: Boolean(box),
     next:
-      match[1] +
-      (number ? String(Number(number[1]) + 1) + number[2] : marker) +
-      (match[3] ? " [ ] " : " "),
+      quoted +
+      (marker
+        ? indent +
+          (number ? String(Number(number[1]) + 1) + number[2] : marker) +
+          (box ? " [ ] " : " ")
+        : ""),
   };
 }
 function replace(
@@ -144,9 +165,17 @@ export function continueList(text: string, caret: number) {
   const { start, line } = lineAt(text, caret);
   const item = listLine(line);
   if (!item || fenced(text, start, line) || caret < start + item.length) return;
-  // An empty nested item moves out one level first; at the top level it ends the list.
-  if (item.length === line.length && item.indent) return indentItem(text, caret, true);
-  if (item.length === line.length) return replace(text, start, start + item.length, "", start);
+  if (item.length === line.length) {
+    // An empty nested item moves out one level first; then it ends the list (in a quote, the
+    // quote stays). An empty quote line leaves one quote level.
+    if (item.marker && item.indent) return indentItem(text, caret, true);
+    let keep = item.quote;
+    if (!item.marker) {
+      keep = item.quote.replace(/[ \t]*>[ \t]?$/, "");
+      if (keep && !/[ \t]$/.test(keep)) keep += " ";
+    }
+    return replace(text, start, start + item.length, keep, start + keep.length);
+  }
   const next = replace(text, caret, caret, "\n" + item.next, caret + 1 + item.next.length);
   return { ...next, text: renumberAfter(next.text, next.start) };
 }
@@ -172,7 +201,40 @@ export function renumberAfter(text: string, at: number) {
   }
   return lines.join("\n");
 }
-/** A bullet ("- ") or task ("- [ ] ") marker, which both editors show as one dot/checkbox. */
+/**
+ * Renumbers the whole ordered list containing line `index` (same indentation and delimiter;
+ * deeper lines belong to its items) from its smallest number, e.g. after moving or indenting
+ * an item. Nested lists whose first item was just created start at 1 (see indentItem).
+ */
+function renumberList(lines: string[], index: number) {
+  const item = orderedItem.exec(lines[index] ?? "");
+  if (!item) return;
+  const belongs = (line: string) => {
+    const other = orderedItem.exec(line);
+    if (other)
+      return other[1] === item[1] && other[3] === item[3]
+        ? "item"
+        : other[1].length > item[1].length
+          ? "child"
+          : undefined;
+    const indent = /^[ \t]*/.exec(line)![0];
+    return line.trim() && indent.length > item[1].length ? "child" : undefined;
+  };
+  let first = index;
+  while (first > 0 && belongs(lines[first - 1])) first--;
+  while (!orderedItem.exec(lines[first]) || orderedItem.exec(lines[first])![1] !== item[1]) first++;
+  const members: number[] = [];
+  for (let at = first; at < lines.length; at++) {
+    const kind = belongs(lines[at]);
+    if (!kind) break;
+    if (kind === "item") members.push(at);
+  }
+  let number = Math.min(...members.map((at) => Number(orderedItem.exec(lines[at])![2])));
+  for (const at of members) {
+    const match = orderedItem.exec(lines[at])!;
+    lines[at] = match[1] + number++ + lines[at].slice(match[1].length + match[2].length);
+  }
+}
 /** Markers both editors replace with a dot, checkbox or quote bar (hidden, removed as one). */
 const styledMarker = /^([ \t]*)((?:[-*+]|\d{1,9}[.)]) \[[ xX]\] |[-*+] |> )/;
 /** Where the text of a bullet/task/quote line starts, for ⌘← / Home ("smart home"). */
@@ -181,30 +243,105 @@ export function markerEnd(line: string) {
   return match ? match[0].length : undefined;
 }
 /**
- * Backspace directly after a bullet or checkbox removes the whole marker in one step (the Mac
- * app's atomic markers). Indentation stays. Not inside fenced code.
+ * Backspace directly after a bullet, checkbox, quote or heading marker removes the whole
+ * marker in one step. Indentation stays. Not inside fenced code.
  */
 export function deleteMarker(text: string, caret: number) {
   const { start, line } = lineAt(text, caret);
-  const match = styledMarker.exec(line);
+  const match = styledMarker.exec(line) ?? /^()(#{1,6} )/.exec(line);
   if (!match || caret !== start + match[0].length || fenced(text, start, line)) return;
   return replace(text, start + match[1].length, caret, "", start + match[1].length);
+}
+/**
+ * Delete at the end of a line joins the next bullet, task or quote line without its marker
+ * ("- a" + "- b" → "- ab"), as Backspace at the start of its text does.
+ */
+export function joinNextItem(text: string, caret: number) {
+  const { start, stop, line } = lineAt(text, caret);
+  if (caret !== stop || stop >= text.length || fenced(text, start, line)) return;
+  const next = lineAt(text, stop + 1);
+  const marker = styledMarker.exec(next.line) ?? orderedItem.exec(next.line);
+  if (!marker || fenced(text, next.start, next.line)) return;
+  const textStart =
+    next.start +
+    marker[0].length +
+    (/^[ \t]/.test(next.line.slice(marker[0].length)) && !styledMarker.exec(next.line) ? 1 : 0);
+  return replace(text, caret, textStart, "", caret);
+}
+/** ⌘Backspace in a bullet/task/quote deletes back to its text, not the marker too. */
+export function deleteToMarker(text: string, caret: number) {
+  const { start, line } = lineAt(text, caret);
+  const end = markerEnd(line);
+  if (end === undefined || caret <= start + end || fenced(text, start, line)) return;
+  return replace(text, start + end, caret, "", start + end);
+}
+/** Return inside a fenced code block keeps the current line's indentation. */
+export function codeIndent(text: string, caret: number) {
+  const { start, line } = lineAt(text, caret);
+  if (!fenced(text, start, line) || /^[ \t]*(`{3,}|~{3,})/.test(line)) return;
+  const indent = /^[ \t]*/.exec(line.slice(0, caret - start))![0];
+  if (!indent) return;
+  return replace(text, caret, caret, "\n" + indent, caret + 1 + indent.length);
+}
+/**
+ * Shift-Return: a line break that stays in the current list item (indented to its text) or
+ * quote, instead of starting a new item.
+ */
+export function softBreak(text: string, caret: number) {
+  const { start, line } = lineAt(text, caret);
+  const item = listLine(line);
+  if (!item || fenced(text, start, line)) return;
+  const quote = item.quote && !/[ \t]$/.test(item.quote) ? item.quote + " " : item.quote;
+  const width = item.marker ? item.indent.length + item.marker.length + 1 : 0;
+  const insert = "\n" + quote + " ".repeat(width);
+  return replace(text, caret, caret, insert, caret + insert.length);
 }
 export function indentItem(text: string, caret: number, outdent: boolean) {
   const { start, line } = lineAt(text, caret);
   const item = listLine(line);
-  if (!item || fenced(text, start, line)) return;
+  if (!item?.marker || fenced(text, start, line)) return;
   const spaces = item.indent.endsWith("\t") ? 1 : Math.min(2, item.indent.length);
   const remove = outdent ? spaces : 0;
   if (outdent && remove === 0) return { text, start: caret, end: caret };
   const insert = outdent ? "" : "  ";
-  return replace(
+  const at = start + item.quote.length;
+  const moved = replace(
     text,
-    start,
-    start + remove,
+    at,
+    at + remove,
     insert,
-    Math.max(start, caret + insert.length - remove),
+    Math.max(at, caret + insert.length - remove),
   );
+  if (!/^\d/.test(item.marker)) return moved;
+  // Ordered items: the item's new list and the list it left are renumbered; a new nested list
+  // starts at 1.
+  const lines = moved.text.split("\n");
+  const index = text.slice(0, start).split("\n").length - 1;
+  const current = orderedItem.exec(lines[index])!;
+  let previous = index - 1;
+  while (
+    previous >= 0 &&
+    lines[previous].trim() &&
+    /^[ \t]*/.exec(lines[previous])![0].length > current[1].length
+  )
+    previous--;
+  const sibling = previous >= 0 && orderedItem.exec(lines[previous]);
+  let shift = 0;
+  if (!outdent && (!sibling || sibling[1] !== current[1])) {
+    lines[index] = current[1] + "1" + lines[index].slice(current[1].length + current[2].length);
+    shift = 1 - current[2].length;
+  }
+  renumberList(lines, index);
+  if (index > 0) renumberList(lines, index - 1);
+  for (let at = index + 1; at < lines.length; at++)
+    if (orderedItem.exec(lines[at])) {
+      renumberList(lines, at);
+      break;
+    }
+  const result = lines.join("\n");
+  const delta = result.length - moved.text.length;
+  const caretAt = moved.start + (delta ? shift : 0);
+  return { text: result, start: caretAt, end: caretAt };
 }
 const taskItem = /^(?:[ \t]*>[ \t]*)*[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[[ xX]\]/;
 export type TaskLocation = { lineStart: number; lineEnd: number; box: number; line: string };
@@ -424,11 +561,34 @@ export function moveLines(text: string, span: Span, up: boolean) {
   if (up ? first === 0 : last === lines.length - 1) return;
   const block = lines.slice(first, last + 1);
   const other = up ? lines[first - 1] : lines[last + 1];
-  const shift = (other.length + 1) * (up ? -1 : 1);
+  const shift = up ? -1 : 1;
   const result = up
     ? [...lines.slice(0, first - 1), ...block, other, ...lines.slice(last + 1)]
     : [...lines.slice(0, first), other, ...block, ...lines.slice(last + 2)];
-  return { text: result.join("\n"), start: span.start + shift, end: span.end + shift };
+  // Keep the selection on the same text by line and column, then renumber ordered lists the
+  // moved lines belong to (their numbers can change width, e.g. 9 → 10).
+  const position = (at: number) => {
+    const before = text.slice(0, at).split("\n");
+    return { line: before.length - 1 + shift, column: before.at(-1)!.length };
+  };
+  // A selection ending just after a line break ends with the moved block (its last line may
+  // become the note's last line, without a break after it).
+  const trailing = span.end > endAt;
+  const anchors = [position(span.start), position(endAt)];
+  const widths = result.map((line) => line.length);
+  for (let at = first + shift; at <= last + shift; at++) renumberList(result, at);
+  renumberList(result, up ? last : first);
+  const offset = ({ line, column }: { line: number; column: number }) => {
+    const grown = result[line].length - widths[line];
+    const number = orderedItem.exec(result[line]);
+    const moved = grown && number && column >= number[0].length ? grown : 0;
+    let at = 0;
+    for (let index = 0; index < line; index++) at += result[index].length + 1;
+    return at + column + moved;
+  };
+  const joined = result.join("\n");
+  const end = Math.min(joined.length, offset(anchors[1]) + (trailing ? 1 : 0));
+  return { text: joined, start: Math.min(offset(anchors[0]), end), end };
 }
 /** The URL of a Markdown link or bare URL at `offset` in `line`, for ⌘-click. */
 export function linkAt(line: string, offset: number) {
@@ -439,16 +599,51 @@ export function linkAt(line: string, offset: number) {
       return match[1] ?? match[0];
   }
 }
+/** Whether a run of `run` delimiter characters contains `delimiter` (** in ***, * in ***). */
+function formatted(run: number, delimiter: string) {
+  if (delimiter === "**") return run === 2 || run === 3;
+  if (delimiter === "*") return run === 1 || run === 3;
+  return run >= delimiter.length;
+}
+/**
+ * ⌘B / ⌘I / ⌘⇧X / inline code: wraps the selection, or removes the formatting when the
+ * selection (or the text around it) already has it, so pressing the shortcut again undoes it.
+ */
 export function wrapSelection(
   text: string,
   span: Span,
   delimiter: string,
 ): Span & { text: string } {
+  const mark = delimiter[0];
+  const count = (from: number, step: number) => {
+    let run = 0;
+    while (text[from + step * run + (step < 0 ? -1 : 0)] === mark) run++;
+    return run;
+  };
+  const d = delimiter.length;
+  // Formatting just outside the selection: **[x]** → x.
+  const outside = Math.min(count(span.start, -1), count(span.end, 1));
+  if (span.end > span.start && formatted(outside, delimiter))
+    return {
+      text:
+        text.slice(0, span.start - d) + text.slice(span.start, span.end) + text.slice(span.end + d),
+      start: span.start - d,
+      end: span.end - d,
+    };
+  // Formatting inside the selection: [**x**] → x.
   const selected = text.slice(span.start, span.end);
+  let inside = 0;
+  while (selected[inside] === mark && selected[selected.length - 1 - inside] === mark) inside++;
+  if (selected.length > 2 * d && formatted(inside, delimiter))
+    return {
+      text: text.slice(0, span.start) + selected.slice(d, -d) + text.slice(span.end),
+      start: span.start,
+      end: span.end - 2 * d,
+    };
   return {
     text: text.slice(0, span.start) + delimiter + selected + delimiter + text.slice(span.end),
-    start: span.start + delimiter.length,
-    end: span.end + delimiter.length,
+    start: span.start + d,
+    end: span.end + d,
   };
 }
 export function insertLink(text: string, span: Span): Span & { text: string } {

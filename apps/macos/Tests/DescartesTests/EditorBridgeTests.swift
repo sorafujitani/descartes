@@ -13,11 +13,12 @@ import XCTest
   let view: WKWebView
   let window: NSWindow
   init(
-    _ markdown: String, images: ((String) async throws -> Data)? = nil
+    _ markdown: String, book existing: Notebook? = nil,
+    images: ((String) async throws -> Data)? = nil
   ) async throws {
     _ = NSApplication.shared
     // Saves succeed in memory, so switching notes never needs the discard alert.
-    book = Notebook(demo: true) { markdown, base in
+    book = existing ?? Notebook(demo: true) { markdown, base in
       Document(id: base?.id ?? UUID(), title: Notebook.title(of: markdown), markdown: markdown, sha: UUID().uuidString)
     }
     book.text = markdown
@@ -140,6 +141,48 @@ final class EditorBridgeTests: XCTestCase {
     XCTAssertNil(scheme.file(for: "/"))
     XCTAssertEqual(EditorScheme.mimeType("a.js"), "text/javascript; charset=utf-8")
     XCTAssertTrue(EditorScheme.policy.contains("connect-src 'none'"))
+  }
+
+  @MainActor func testShortcutsTypedInTheEditorRunOnce() async throws {
+    try XCTSkipIf(EditorScheme.bundledRoot() == nil, "Run pnpm test:macos to build the editor.")
+    let app = NSApplication.shared
+    let previous = app.mainMenu
+    let saved = UserDefaults.standard.object(forKey: "noteZoomTenths")
+    defer {
+      app.mainMenu = previous
+      UserDefaults.standard.set(saved, forKey: "noteZoomTenths")
+    }
+    let delegate = AppDelegate()
+    delegate.buildMenus()
+    // The menu and the page edit the same notebook, so a shortcut run by both would show.
+    let editor = try await EditorHarness("# T\n牛乳", book: delegate.book)
+    editor.window.makeFirstResponder(editor.view)
+    _ = try await editor.js("window.descartes.focus(); window.descartes.select(4, 6)")
+    /// What AppKit does in the key window: the focused view (the web page) first, then the
+    /// app menu only if the page did not handle the key equivalent.
+    func press(_ key: String, _ code: UInt16, _ flags: NSEvent.ModifierFlags) throws {
+      let event = try XCTUnwrap(
+        NSEvent.keyEvent(
+          with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
+          windowNumber: editor.window.windowNumber, context: nil, characters: key,
+          charactersIgnoringModifiers: key, isARepeat: false, keyCode: code))
+      if !editor.window.performKeyEquivalent(with: event) {
+        _ = app.mainMenu?.performKeyEquivalent(with: event)
+      }
+    }
+    try press("b", 11, .command)
+    try await editor.until("bold") { editor.book.text != "# T\n牛乳" }
+    try await Task.sleep(for: .milliseconds(300))
+    // Once: a second run (page and menu) would toggle the bold off again.
+    XCTAssertEqual(editor.book.text, "# T\n**牛乳**")
+    try press("z", 6, .command)
+    try await editor.until("undone") { editor.book.text == "# T\n牛乳" }
+    try await Task.sleep(for: .milliseconds(300))
+    XCTAssertEqual(editor.book.text, "# T\n牛乳")
+    // Keys the page does not use (zoom) still reach the app menu.
+    let zoom = delegate.book.zoom
+    try press("-", 27, .command)
+    try await editor.until("zoom") { delegate.book.zoom == max(5, zoom - 1) }
   }
 
   @MainActor func testMenusRouteEditingCommandsToTheEditor() throws {

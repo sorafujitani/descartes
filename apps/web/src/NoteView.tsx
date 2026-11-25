@@ -1,9 +1,13 @@
 import { forwardRef, useImperativeHandle, useLayoutEffect, useRef } from "react";
-import { Annotation, Compartment, EditorState, Facet } from "@codemirror/state";
+import { Annotation, Compartment, EditorState, Facet, Transaction } from "@codemirror/state";
 import {
   breakBeforeHeading,
   closeFence,
+  codeIndent,
   continueList,
+  deleteToMarker,
+  joinNextItem,
+  softBreak,
   deleteMarker,
   headingCaret,
   imagePath,
@@ -31,7 +35,9 @@ import {
 } from "@codemirror/view";
 import {
   defaultKeymap,
+  deleteCharForward,
   history,
+  isolateHistory,
   historyKeymap,
   indentLess,
   insertNewline,
@@ -287,41 +293,106 @@ class RepositoryImage extends WidgetType {
     return true;
   }
 }
+const hiddenMark = Decoration.replace({});
+const inlineCode = Decoration.mark({ class: "cm-inline-code" });
+const linkLabel = Decoration.mark({ class: "cm-link-label" });
+const inlineMarks = new Set(["EmphasisMark", "CodeMark", "StrikethroughMark"]);
 function taskDecorations(view: EditorView): DecorationSet {
   const ranges: ReturnType<Decoration["range"]>[] = [];
+  /** Whether the caret or a selection touches [from, to] (then its Markdown is shown). */
+  const editing = (from: number, to: number) =>
+    view.hasFocus &&
+    view.state.selection.ranges.some((range) => range.from <= to && range.to >= from);
   for (const visible of view.visibleRanges)
     syntaxTree(view.state).iterate({
       from: visible.from,
       to: visible.to,
       enter(node) {
+        // Live preview: inline Markdown (**, *, ~~, `, link syntax) is hidden unless the caret
+        // is inside that element, like other note editors. The text itself never changes.
+        if (
+          node.name === "Emphasis" ||
+          node.name === "StrongEmphasis" ||
+          node.name === "Strikethrough" ||
+          node.name === "InlineCode"
+        ) {
+          const marks: [number, number][] = [];
+          for (let child = node.node.firstChild; child; child = child.nextSibling)
+            if (inlineMarks.has(child.name)) marks.push([child.from, child.to]);
+          if (node.name === "InlineCode" && marks.length === 2 && marks[0][1] < marks[1][0])
+            ranges.push(inlineCode.range(marks[0][1], marks[1][0]));
+          if (!editing(node.from, node.to))
+            for (const [from, to] of marks) if (to > from) ranges.push(hiddenMark.range(from, to));
+        } else if (node.name === "Link") {
+          const marks: { name: string; from: number; to: number }[] = [];
+          for (let child = node.node.firstChild; child; child = child.nextSibling)
+            marks.push({ name: child.name, from: child.from, to: child.to });
+          const open = marks.find((mark) => mark.name === "LinkMark");
+          const close = marks.filter((mark) => mark.name === "LinkMark")[1];
+          const url = marks.find((mark) => mark.name === "URL");
+          // Only [label](url) links: the label stays, the brackets and URL hide.
+          if (open && close && url && close.from > open.to) {
+            ranges.push(linkLabel.range(open.to, close.from));
+            if (!editing(node.from, node.to)) {
+              ranges.push(hiddenMark.range(open.from, open.to));
+              ranges.push(hiddenMark.range(close.from, node.to));
+            }
+          }
+        }
+        if (node.name === "Table") {
+          // Tables keep their columns aligned in a monospaced font.
+          for (
+            let line = view.state.doc.lineAt(node.from);
+            ;
+            line = view.state.doc.line(line.number + 1)
+          ) {
+            ranges.push(Decoration.line({ class: "cm-table" }).range(line.from));
+            if (line.to >= node.to || line.number >= view.state.doc.lines) break;
+          }
+        }
         if (node.name === "ListMark") {
           // Wrapped item text lines up after its dot, checkbox or number (as in the Mac app).
           const line = view.state.doc.lineAt(node.from);
           const indent = Math.min(12, node.from - line.from);
           const mark = view.state.doc.sliceString(node.from, node.to);
           const task = /^[ \t]+\[[ xX]\]/.test(view.state.doc.sliceString(node.to, node.to + 5));
-          const kind = task || /^[-*+]$/.test(mark) ? "b" : mark.length > 2 ? "o2" : "o1";
+          const digits = mark.length - 1;
+          const kind =
+            task || /^[-*+]$/.test(mark) ? "b" : digits >= 3 ? "o3" : digits === 2 ? "o2" : "b";
           ranges.push(Decoration.line({ class: `cm-hang-${kind}-${indent}` }).range(line.from));
+          // Numbers (and their space) sit in a fixed-width box like bullets and checkboxes, so
+          // the text and its wrapped lines start at the same place whatever the font.
+          if (!task && /^\d/.test(mark) && view.state.doc.sliceString(node.to, node.to + 1) === " ")
+            ranges.push(
+              Decoration.mark({ class: `cm-ordered cm-ordered-${Math.min(3, digits)}` }).range(
+                node.from,
+                node.to + 1,
+              ),
+            );
         }
         if (node.name === "QuoteMark") {
           // The first "> " on a line becomes a quote bar (the Mac app hides it the same way).
           const line = view.state.doc.lineAt(node.from);
           const prefix = view.state.doc.sliceString(line.from, node.from);
           const space = view.state.doc.sliceString(node.to, node.to + 1) === " " ? 1 : 0;
-          if (/^[ \t]*$/.test(prefix) && (space || node.to === line.to)) {
-            ranges.push(
-              Decoration.line({
-                class: `cm-quote cm-hang-b-${Math.min(12, node.from - line.from)}`,
-              }).range(line.from),
-            );
+          // Every quote level ("> > ") becomes its own bar.
+          const nested = /^[ \t]*(?:>[ \t]?)*$/.test(prefix);
+          if (nested && (space || node.to === line.to)) {
+            if (/^[ \t]*$/.test(prefix))
+              ranges.push(
+                Decoration.line({
+                  class: `cm-quote cm-hang-b-${Math.min(12, node.from - line.from)}`,
+                }).range(line.from),
+              );
             ranges.push(quoteBar.range(node.from, node.to + space));
           }
         } else if (node.name === "ListMark") {
           const mark = view.state.doc.sliceString(node.from, node.to);
           const after = view.state.doc.sliceString(node.to, node.to + 5);
           // Task items are drawn by their checkbox; ordered items keep their numbers.
+          // The dot covers the marker and its space, so the text starts where wrapped lines do.
           if (/^[-*+]$/.test(mark) && /^[ \t]/.test(after) && !/^[ \t]+\[[ xX]\]/.test(after))
-            ranges.push(bullet.range(node.from, node.to));
+            ranges.push(bullet.range(node.from, node.to + 1));
         } else if (node.name === "TaskMarker") {
           const line = view.state.doc.lineAt(node.from);
           const prefix = view.state.doc.sliceString(line.from, node.from);
@@ -332,7 +403,11 @@ function taskDecorations(view: EditorView): DecorationSet {
             Decoration.replace({
               atomic: true,
               widget: new TaskCheckbox(node.from + 1, checked, view.state.readOnly),
-            }).range(from, node.to),
+            }).range(
+              from,
+              // The checkbox covers its following space too (see the bullet above).
+              view.state.doc.sliceString(node.to, node.to + 1) === " " ? node.to + 1 : node.to,
+            ),
           );
           if (checked && node.to < line.to)
             ranges.push(Decoration.mark({ class: "cm-completed-task" }).range(node.to, line.to));
@@ -374,6 +449,18 @@ function taskDecorations(view: EditorView): DecorationSet {
             ranges.push(Decoration.line({ class: classes.join(" ") }).range(line.from));
             if (fence && !editingLine && line.to > line.from)
               ranges.push(Decoration.replace({}).range(line.from, line.to));
+          }
+        } else if (node.name === "HorizontalRule") {
+          // "---" shows as a rule away from the caret (as the Mac app always drew it).
+          const line = view.state.doc.lineAt(node.from);
+          const editingLine =
+            view.hasFocus &&
+            view.state.selection.ranges.some(
+              (range) => range.from <= line.to && range.to >= line.from,
+            );
+          if (!editingLine) {
+            ranges.push(Decoration.line({ class: "cm-rule" }).range(line.from));
+            ranges.push(Decoration.replace({}).range(node.from, node.to));
           }
         } else if (node.name === "HeaderMark") {
           const line = view.state.doc.lineAt(node.from);
@@ -434,19 +521,17 @@ const proseHighlight = HighlightStyle.define([
   { tag: tags.emphasis, fontStyle: "italic" },
   { tag: tags.strikethrough, textDecoration: "line-through" },
   { tag: [tags.link, tags.url], color: "var(--color-accent)" },
-  {
-    tag: [tags.monospace, tags.processingInstruction],
-    fontFamily: "var(--font-code)",
-    color: "var(--color-code-text)",
-  },
+  { tag: tags.monospace, fontFamily: "var(--font-code)", color: "var(--color-code-text)" },
+  // Markdown syntax (list numbers, quote and emphasis marks) in the body font, quieter.
+  { tag: tags.processingInstruction, color: "var(--color-text-muted)" },
   { tag: tags.meta, color: "var(--color-text-muted)" },
 ]);
 /** Hanging indents per indentation (CSP forbids inline styles, so these are classes). */
 const hangingIndents: Record<string, { paddingLeft: string; textIndent: string }> = {};
 for (const [kind, width] of [
   ["b", "1.45rem"],
-  ["o1", "1.3em"],
-  ["o2", "1.85em"],
+  ["o2", "1.95rem"],
+  ["o3", "2.45rem"],
 ] as const)
   for (let indent = 0; indent <= 12; indent++) {
     const hang = `calc(${indent} * 0.28em + ${width})`;
@@ -526,6 +611,24 @@ const noteTheme = EditorView.theme({
   ".cm-code-fence": { color: "var(--color-text-muted)", fontSize: "0.85em" },
   ".cm-fence-hidden": { fontSize: "0", lineHeight: "0.75rem", padding: "0 1rem" },
   ".cm-quote": { color: "var(--color-text-muted)" },
+  ".cm-ordered": { display: "inline-block", textIndent: "0", whiteSpace: "pre" },
+  ".cm-ordered-1": { width: "1.45rem" },
+  ".cm-ordered-2": { width: "1.95rem" },
+  ".cm-ordered-3": { width: "2.45rem" },
+  ".cm-inline-code": {
+    padding: "0.1em 0.3em",
+    borderRadius: "4px",
+    backgroundColor: "var(--color-code-bg)",
+    fontSize: "0.9em",
+  },
+  ".cm-link-label": { color: "var(--color-accent)", textDecoration: "underline" },
+  ".cm-table": { fontFamily: "var(--font-code)", fontSize: "0.9em" },
+  ".cm-rule": {
+    backgroundImage: "linear-gradient(var(--color-border, #2d333b), var(--color-border, #2d333b))",
+    backgroundSize: "100% 1px",
+    backgroundPosition: "center",
+    backgroundRepeat: "no-repeat",
+  },
   ".cm-quote-bar": {
     display: "inline-block",
     width: "3px",
@@ -604,6 +707,26 @@ export const NoteView = forwardRef<
     if (!root.current) return;
     /** After "[]" becomes "- [ ] ", the space typed next would double the separator. */
     let absorbSpaceAt: number | null = null;
+    /** The todo shortcut for text committed by an IME, once the composition has ended. */
+    const composedShortcut = (view: EditorView, tries = 5) => {
+      if (rawRef.current || view.state.readOnly) return;
+      if (view.composing) {
+        if (tries > 0) setTimeout(() => composedShortcut(view, tries - 1), 20);
+        return;
+      }
+      const { head, empty } = view.state.selection.main;
+      const doc = view.state.doc.toString();
+      if (!empty || !/[\]］」]$/.test(doc.slice(0, head))) return;
+      const todo = todoShortcut(doc, head);
+      if (!todo) return;
+      view.dispatch({
+        changes: { from: todo.from, to: todo.to, insert: todo.insert },
+        selection: { anchor: todo.from + todo.insert.length },
+        userEvent: "input.autoformat",
+        annotations: isolateHistory.of("before"),
+      });
+      if (todo.absorbSpace) absorbSpaceAt = todo.from + todo.insert.length;
+    };
     const view = new EditorView({
       parent: root.current,
       state: EditorState.create({
@@ -619,6 +742,7 @@ export const NoteView = forwardRef<
               key: "Enter",
               run: (view) =>
                 sharedCommand(closeFence)(view) ||
+                sharedCommand(codeIndent)(view) ||
                 sharedCommand(breakBeforeHeading)(view) ||
                 sharedCommand(continueList)(view) ||
                 insertNewline(view),
@@ -627,6 +751,15 @@ export const NoteView = forwardRef<
               key: "Backspace",
               run: (view) => sharedCommand(deleteMarker)(view) || deleteMarkupBackward(view),
             },
+            {
+              key: "Delete",
+              run: (view) => sharedCommand(joinNextItem)(view) || deleteCharForward(view),
+            },
+            {
+              key: "Shift-Enter",
+              run: (view) => sharedCommand(softBreak)(view) || insertNewline(view),
+            },
+            { mac: "Mod-Backspace", run: sharedCommand(deleteToMarker) },
             {
               // List items indent as a whole; elsewhere Tab inserts a tab at the caret.
               key: "Tab",
@@ -681,16 +814,27 @@ export const NoteView = forwardRef<
               }
             }
             if (insert === " " && from === to && from === absorb) return true;
+            // IME input is left to CodeMirror (intercepting it duplicated the composed text);
+            // the shortcut is applied once the composition is committed (see the listener).
+            if (view.composing || view.compositionStarted) return false;
             if (!/[\]］」]$/.test(insert) || view.state.readOnly) return false;
             const doc = view.state.doc.toString();
             const typed = doc.slice(0, from) + insert + doc.slice(to);
             const caret = from + insert.length;
             const todo = todoShortcut(typed, caret);
             if (!todo) return false;
+            // The typed bracket first, then the conversion as its own undo step, so ⌘Z turns
+            // "- [ ] " back into the "[]" you typed (as other editors' autoformat does).
             view.dispatch({
-              changes: { from: todo.from, to, insert: todo.insert },
-              selection: { anchor: todo.from + todo.insert.length },
+              changes: { from, to, insert },
+              selection: { anchor: caret },
               userEvent: "input.type",
+            });
+            view.dispatch({
+              changes: { from: todo.from, to: caret, insert: todo.insert },
+              selection: { anchor: todo.from + todo.insert.length },
+              userEvent: "input.autoformat",
+              annotations: [isolateHistory.of("before"), Transaction.addToHistory.of(true)],
             });
             if (todo.absorbSpace) absorbSpaceAt = todo.from + todo.insert.length;
             return true;
@@ -720,6 +864,10 @@ export const NoteView = forwardRef<
             };
           }),
           EditorView.domEventHandlers({
+            compositionend(_event, view) {
+              setTimeout(() => composedShortcut(view));
+              return false;
+            },
             mousedown(event, view) {
               // ⌘-click (Ctrl-click elsewhere) opens a link, as in the Mac app.
               if (!(event.metaKey || event.ctrlKey) || event.button !== 0) return false;
@@ -741,6 +889,14 @@ export const NoteView = forwardRef<
           EditorView.updateListener.of((update) => {
             if (update.selectionSet && update.state.selection.main.head !== absorbSpaceAt)
               absorbSpaceAt = null;
+            // "「」" committed by the Japanese IME at a line start becomes a todo, like "[]".
+            if (
+              update.docChanged &&
+              update.transactions.some((transaction) =>
+                transaction.isUserEvent("input.type.compose"),
+              )
+            )
+              setTimeout(() => composedShortcut(update.view));
             if (
               update.docChanged &&
               !update.transactions.some((transaction) => transaction.annotation(externalChange))

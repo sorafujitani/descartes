@@ -131,6 +131,36 @@ try {
     assert.equal(await page.locator(".cm-task-checkbox").count(), 1, "one checkbox for one task");
     assert.equal(await page.locator(".cm-bullet").count(), 2, "bullets stay bullets after blur");
     assert.equal(await page.locator(".cm-quote-bar").count(), 1, "the quote shows its bar");
+    // Japanese IME: "「」" committed at a line start becomes a todo, without duplicating the
+    // composed text (CodeMirror owns composition input).
+    await editor.click();
+    await editor.press("ControlOrMeta+End");
+    await editor.press("Enter");
+    await editor.press("Enter");
+    const cdp = await page.context().newCDPSession(page);
+    for (const reading of ["「", "「」"])
+      await cdp.send("Input.imeSetComposition", {
+        text: reading,
+        selectionStart: reading.length,
+        selectionEnd: reading.length,
+      });
+    await cdp.send("Input.insertText", { text: "「」" });
+    // People take longer than this to start the next word.
+    await page.waitForTimeout(100);
+    for (const reading of ["ぎ", "ぎゅう"])
+      await cdp.send("Input.imeSetComposition", {
+        text: reading,
+        selectionStart: reading.length,
+        selectionEnd: reading.length,
+      });
+    await cdp.send("Input.insertText", { text: "牛" });
+    await page.waitForTimeout(100);
+    assert.equal(await page.locator(".cm-task-checkbox").count(), 2, "IME 「」 makes a todo");
+    assert.equal(
+      await page.locator(".cm-line").last().textContent(),
+      "牛",
+      "the composed text appears once, after the checkbox (which covers its space)",
+    );
     console.log(
       JSON.stringify({
         viewport: name,
@@ -138,6 +168,7 @@ try {
         editing: true,
         checkboxSave: true,
         widgetsAfterBlur: true,
+        imeTodo: true,
         cspViolations: 0,
       }),
     );

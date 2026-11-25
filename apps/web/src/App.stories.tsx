@@ -115,7 +115,8 @@ export const EditingShortcutsAndPreview: Story = {
     await waitFor(() =>
       expect(canvas.getByRole("textbox", { name: "Markdown本文" })).toHaveFocus(),
     );
-    await expect(editor).toHaveTextContent("**alpha**");
+    // Live preview shows the ** only while the caret is in the bold text (saved above either way).
+    await expect(editor).toHaveTextContent("alpha");
   },
 };
 
