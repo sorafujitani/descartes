@@ -291,5 +291,18 @@ export const LivePreviewLayout: StoryObj<typeof meta> = {
       ["六", "七"],
     ])
       await expect(textX(child) - textX(parent)).toBeGreaterThan(20);
+    // The selection is translucent so selected text stays readable (CodeMirror's opaque
+    // light-theme lavender used to win in the focused editor).
+    view.focus();
+    view.dispatch({ selection: { anchor: 4, head: nested.length } });
+    const layer = await waitFor(() => {
+      const element = dom.querySelector<HTMLElement>(".cm-selectionBackground");
+      if (!element) throw new Error("no selection drawn");
+      return element;
+    });
+    const color = getComputedStyle(layer).backgroundColor;
+    const alpha = Number(/[/,]\s*([\d.]+)\s*\)$/.exec(color)?.[1] ?? 1);
+    await expect(color).not.toBe("rgb(215, 212, 240)");
+    await expect(alpha).toBeLessThan(0.5);
   },
 };
