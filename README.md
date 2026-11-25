@@ -15,14 +15,14 @@ Open the local address printed by `cf dev`. Create a document beginning with `# 
 
 ## Workspace
 
-| Path              | Responsibility                                                                                |
-| ----------------- | --------------------------------------------------------------------------------------------- |
-| `apps/web`        | React PWA, CodeMirror live editor, Ox Content preview, Storybook and Cloudflare configuration |
-| `apps/api`        | Hono HTTP boundary, Access JWT verification, repository interface and GitHub storage adapter  |
-| `apps/macos`      | Native Markdown notebook with a window-sized NSTextView, title search and SHA-checked saves   |
-| `packages/shared` | Document types, title convention, API client                                                  |
+| Path              | Responsibility                                                                                  |
+| ----------------- | ----------------------------------------------------------------------------------------------- |
+| `apps/web`        | React PWA, CodeMirror live editor, Ox Content preview, Storybook and Cloudflare configuration   |
+| `apps/api`        | Hono HTTP boundary, Access JWT verification, repository interface and GitHub storage adapter    |
+| `apps/macos`      | Native Mac notebook (SwiftUI/AppKit) hosting the web editor in a WKWebView; title search, saves |
+| `packages/shared` | Document types, title convention, API client                                                    |
 
-The mobile and web clients use the same UI. Install from the browser's install menu or **Add to Home Screen** on iOS. No offline cache or offline sync. The Mac app uses its own native editor and connects directly to the same API; it does not launch a browser.
+The mobile and web clients use the same UI. Install from the browser's install menu or **Add to Home Screen** on iOS. No offline cache or offline sync. The Mac app is a native window around the **same CodeMirror editor** as the web app (built from `apps/web/editor.html` and loaded into a WKWebView), so editing behaves identically on both; it connects directly to the same API and does not launch a browser.
 
 ## Toolchain
 
@@ -67,7 +67,7 @@ With Xcode installed, run `pnpm build:macos`, copy `apps/macos/dist/Descartes.ap
 
 Type directly in the window. Start the first line with `# Title`. **⌘P** finds a document, **⌘N** starts a new one, and edits are autosaved (see [Autosave](#autosave)); **⌘S** commits immediately. Headings and fenced code are styled in place, not converted to HTML. The app remembers the last open document and window frame. A conflicting save retains the unsaved draft and stops autosave; copy it before reopening the latest version. Switching documents, quitting and switching to another app save first; the app asks before discarding only changes that could not be saved.
 
-The web app and the Mac app share the same Markdown editing commands. On the web, press **⌘K** or **ショートカット**. On the Mac, use **⌘K** or the **⌘** button. Completed tasks are muted and struck through in the note view and in preview. Fenced code is shown as a Document Design System code block; its fences (and the language after ` ``` `) are hidden except on the caret's line, where they are muted and editable; read-only preview always hides them. Return after an opening fence adds the closing fence and puts the caret inside, unless the fence opens an existing block below; a new block above other blocks never pairs with their fences. Typing the closing fence by hand steps over the added one. On both clients, **⌘Return** turns plain text, bullets and numbered items (or every selected line) into tasks (`- [ ] `) and otherwise toggles them, and typing `[]` (or `［］`, or the Japanese IME's `「」`) at the start of a line or bullet creates a task. Both show bullets as dots, tasks (including numbered `1. [ ]` tasks) as outlined checkboxes and quotes as a bar with quieter text, with wrapped item text lined up after the marker; Return in an ordered list renumbers the following items, and `~~strikethrough~~` and `_emphasis_` are styled; the command logic lives in `packages/shared/src/edit.ts` and is mirrored in the Mac app's `MarkdownCommands.swift`, with the same test tables on both sides. On the Mac, the checklist button does the same as ⌘Return, clicking a checkbox toggles it without moving the caret (also in preview), and bullets/checkboxes stay aligned with the text while typing, follow the zoom level, and wrapped item text lines up after them.
+The web app and the Mac app share the same Markdown editing commands. On the web, press **⌘K** or **ショートカット**. On the Mac, use **⌘K** or the **⌘** button. Completed tasks are muted and struck through in the note view and in preview. Fenced code is shown as a Document Design System code block; its fences (and the language after ` ``` `) are hidden except on the caret's line, where they are muted and editable; read-only preview always hides them. Return after an opening fence adds the closing fence and puts the caret inside, unless the fence opens an existing block below; a new block above other blocks never pairs with their fences. Typing the closing fence by hand steps over the added one. On both clients, **⌘Return** turns plain text, bullets and numbered items (or every selected line) into tasks (`- [ ] `) and otherwise toggles them, and typing `[]` (or `［］`, or the Japanese IME's `「」`) at the start of a line or bullet creates a task. Both show bullets as dots, tasks (including numbered `1. [ ]` tasks) as outlined checkboxes and quotes as a bar with quieter text, with wrapped item text lined up after the marker; Return in an ordered list renumbers the following items, and `~~strikethrough~~` and `_emphasis_` are styled; the command logic lives in `packages/shared/src/edit.ts` and the editor in `apps/web/src/NoteView.tsx`, used unchanged by both clients. On the Mac, the checklist button does the same as ⌘Return, and the Note and Edit menus run the same editor commands.
 
 **Keyboard editing** (also listed in the File, Edit and Note menus):
 
@@ -95,11 +95,11 @@ The web app and the Mac app share the same Markdown editing commands. On the web
 | ⌘+ (or ⌘=), ⌘−, ⌘0                       | Increase, decrease or reset the note zoom (saved between launches)              |
 | ⌫ after a styled marker                  | Remove the entire bullet, checkbox or heading marker in one edit                |
 
-Standalone notebook image references (PNG, JPEG and WebP) display as images in styled editing and preview. Source mode shows their Markdown. External URLs are never requested by the native image loader.
+Standalone notebook image references (PNG, JPEG and WebP) display as images in styled editing and preview. Source mode shows their Markdown. On the Mac, the editor page is served from the app's own `descartes-editor://` scheme with a strict Content-Security-Policy (no network access); note images are fetched by Swift with the Access credentials, only for asset names produced by the attachment endpoint. External URLs are never requested by the editor.
 
 The appearance control at the top right adjusts background transparency without fading the text. The editor and title picker share the Document Design System palette and system fonts. The macOS Reduce Transparency setting overrides the glass effect.
 
-To test without credentials, run `pnpm dev:demo --port 8788` and launch `open -n apps/macos/dist/Descartes.app --args --demo`. With that Worker running, `DESCARTES_TEST_DEMO=1 pnpm test:macos` exercises the native editor, create/read/update and conflicts against the in-memory repository. Demo mode never sends credentials.
+To test without credentials, run `pnpm dev:demo --port 8788` and launch `open -n apps/macos/dist/Descartes.app --args --demo`. With that Worker running, `DESCARTES_TEST_DEMO=1 pnpm test:macos` exercises the embedded editor, create/read/update, conflicts and uploaded images against the in-memory repository. Demo mode never sends credentials.
 
 ## Autosave
 
@@ -126,8 +126,8 @@ The intervals are `autosaveTiming` in `apps/web/src/App.tsx` and `Notebook.Timin
 
 Editing bugs are caught with keystroke scenarios rather than only unit tests of the command functions:
 
-- **Shared scenarios** — [`tests/fixtures/editing-scenarios.json`](tests/fixtures/editing-scenarios.json) lists a starting note, caret, keys (`{return}`, `{tab}`, `{cmd-return}`, …) and the expected Markdown/caret. The Mac suite types them into the real `NSTextView` (`EditorScenarioTests.testSharedScenariosMatchTheWebEditor`) and Storybook types them into the real CodeMirror editor in Chromium (`EditingScenarios.stories.tsx`). A behaviour difference between the clients fails one side; add a scenario for every editing bug fixed.
-- **Mac invariants after every key** — `Scenario` in `EditorScenarioTests.swift` checks after each keystroke and IME step that the caret line (and any IME composition) is visible, typing attributes are visible, the caret is never inside a hidden marker, incremental styling equals a full restyle (during IME composition, markers and code blocks outside the composing line are where a full restyle would put them), and the notebook text mirrors the view. One undo group per simulated key keeps undo/redo realistic.
+- **Shared scenarios** — [`tests/fixtures/editing-scenarios.json`](tests/fixtures/editing-scenarios.json) lists a starting note, caret, keys (`{return}`, `{tab}`, `{cmd-return}`, …) and the expected Markdown/caret. Storybook types them into the real CodeMirror editor (`EditingScenarios.stories.tsx`) in Chromium and in **WebKit**, the engine of the Mac app's WKWebView. Add a scenario for every editing bug fixed.
+- **Mac bridge tests** — `EditorBridgeTests.swift` loads the built editor in a WKWebView and checks that notes, preview/source/zoom and new notes reach the page, typing and menu commands (task, undo, bold, move lines) come back to the notebook, and images load only through the authenticated asset path.
 - **Shared command unit tests** — `tests/edit.test.ts` covers `packages/shared/src/edit.ts` (Return, Backspace, ⌘Return, `[]`, fences, CRLF) quickly in `pnpm test`.
 
 ## Architecture and performance verification
@@ -138,15 +138,15 @@ GitHub-backed scans inspect at most 16 documents per request with D1 (allowing f
 
 The GitHub adapter bounds content retention to 8 MiB of UTF-16 text / 1,024 blobs, 4,096 titles and 16 search result sets per repository. Production retains at most four credential-scoped adapters. The browser renderer retains at most eight source/HTML pairs within 4 MiB. These caches are optimizations, not durable data stores; eviction or a cold isolate must not affect correctness.
 
-The native editor re-attributes only the edited line when a single UTF-16 edit preserves paragraph/fence state. Newlines, fence changes, batched edits, IME composition and presentation changes fall back to full styling. Image completion re-styles only the current matching image lines; ImageIO thumbnail decoding runs on a separate serial actor. Code backgrounds outside the dirty visible character range are skipped. Later cached offsets still shift linearly, and a single enormous visible code block can still require full block layout.
+Both clients use CodeMirror's incremental parsing and viewport rendering: decorations are computed only for visible ranges and mapped through edits, including during IME composition.
 
 ```sh
 pnpm test        # API, cache/concurrency, search, client, actual WASM, jsdom save/render races and sanitization
 pnpm check      # TypeScript, formatting and lint
 pnpm build      # production Worker + web, including the dedicated Markdown Worker
-pnpm test:macos # keystroke scenarios with invariants, shared web/Mac scenarios, incremental styling, IME, undo
+pnpm test:macos # builds the editor page, then Swift tests: WKWebView bridge, scheme/CSP, menus, autosave
 # With pnpm dev:demo --port 8788 running:
-DESCARTES_TEST_DEMO=1 pnpm test:macos # native create/read/update/conflicts and screenshot rendering
+DESCARTES_TEST_DEMO=1 pnpm test:macos # embedded editor create/read/update/conflicts and uploaded images
 ```
 
 Regression tests assert request counts, concurrency bounds and styled-line counts instead of noisy wall-clock thresholds. They verify tree invalidation after saves/external SHA changes, immutable index writes completed in reverse order, deleted-file exclusion, credential isolation, failed-load retries, stale asynchronous responses and preserving edits during saves. SQL tests use both real SQLite/FTS5 and workerd's D1 implementation. The Mac picker tests measure the actual field editor between the native search/clear button rectangles, including live resizing and IME. Run `pnpm bench:search` for a synthetic, local-SQLite cold-index / cold-Worker comparison; those elapsed times are **not production latency measurements**.

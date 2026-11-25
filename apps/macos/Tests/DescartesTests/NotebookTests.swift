@@ -11,8 +11,9 @@ final class NotebookTests: XCTestCase {
     XCTAssertEqual(book.title, "メモ")
     XCTAssertTrue(book.dirty)
   }
-  @MainActor func testNativeEditorRoundTrip() async throws {
+  @MainActor func testEditorRoundTripWithTheWorker() async throws {
     try XCTSkipUnless(ProcessInfo.processInfo.environment["DESCARTES_TEST_DEMO"] == "1")
+    try XCTSkipIf(EditorScheme.bundledRoot() == nil, "Run pnpm test:macos to build the editor.")
     _ = NSApplication.shared
     let book = Notebook(demo: true)
     let window = NSWindow(
@@ -20,80 +21,53 @@ final class NotebookTests: XCTestCase {
       backing: .buffered, defer: false)
     window.contentView = NSHostingView(rootView: NoteWindow(book: book))
     window.displayIfNeeded()
-    func findEditor(_ view: NSView) -> NSTextView? {
-      if let text = view as? NSTextView { return text }
-      for child in view.subviews { if let text = findEditor(child) { return text } }
-      return nil
-    }
-    func settle() async throws {
-      for _ in 0..<100 {
+    func until(_ what: String, _ condition: () async throws -> Bool) async throws {
+      for _ in 0..<500 {
+        if try await condition() { return }
         try await Task.sleep(nanoseconds: 20_000_000)
-        if !book.busy && !book.saving { return }
       }
-      XCTFail("Timed out")
+      XCTFail("Timed out: " + what)
     }
-    try await settle()
-    let editor = try XCTUnwrap(findEditor(window.contentView!))
-    let scroll = try XCTUnwrap(editor.enclosingScrollView)
-    XCTAssertGreaterThan(scroll.frame.width, 850)
-    XCTAssertGreaterThan(scroll.frame.height, 550)
+    func settle() async throws { try await until("idle") { !book.busy && !book.saving } }
+    func text() async throws -> String? {
+      try await book.editor.evaluate("window.descartes.text()") as? String
+    }
+    try await until("editor ready") { book.editor.ready }
+    let view = try XCTUnwrap(book.editor.webView)
+    XCTAssertGreaterThan(view.frame.width, 850)
+    XCTAssertGreaterThan(view.frame.height, 550)
     let draft = "# Editor round trip\n日本語"
-    editor.insertText(
-      draft, replacementRange: NSRange(location: 0, length: (editor.string as NSString).length))
-    XCTAssertEqual(book.text, draft)
+    _ = try await book.editor.evaluate(
+      "window.descartes.focus(); window.descartes.select(0, window.descartes.text().length);"
+        + "document.execCommand('insertText', false, \(String(reflecting: draft)))")
+    try await until("typed") { book.text == draft }
     book.save()
+    try await until("saved") { book.base?.markdown == draft }
     try await settle()
     let original = try XCTUnwrap(book.base)
     book.new()
+    try await until("new note") { try await text() == "# " }
     book.open(original.id)
     try await settle()
-    XCTAssertEqual(editor.string, draft)
+    try await until("reopened") { try await text() == draft }
     let api = try API(demo: true)
     _ = try await api.save(draft + " remote", base: original)
-    editor.insertText(
-      " local", replacementRange: NSRange(location: (editor.string as NSString).length, length: 0))
+    _ = try await book.editor.evaluate(
+      "window.descartes.focus();"
+        + "window.descartes.select(window.descartes.text().length, window.descartes.text().length);"
+        + "document.execCommand('insertText', false, ' local')")
+    try await until("typed") { book.text == draft + " local" }
     book.save()
+    try await until("conflict reported") { book.message.contains("競合") }
     try await settle()
     XCTAssertTrue(book.dirty)
     XCTAssertTrue(book.message.contains("競合"))
-    XCTAssertEqual(editor.string, draft + " local")
+    let shown = try await text()
+    XCTAssertEqual(shown, draft + " local")
   }
-  @MainActor func testNoteDecorationsEditSource() throws {
-    _ = NSApplication.shared
-    let book = Notebook(demo: true)
-    let text = NoteText(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
-    let coordinator = Editor.Coordinator(book)
-    text.delegate = coordinator
-    let markdown =
-      "# task\n- [ ] example\n  - child\n---\nhttps://example.com\n```\n- [ ] code\n```"
-    text.string = markdown
-    coordinator.style(text)
-    XCTAssertEqual(text.string, markdown)
-    XCTAssertEqual(text.decorations.count, 3)
-    let task = try XCTUnwrap(text.decorations.first)
-    let box = try XCTUnwrap(text.box(at: task.at))
-    let label = try XCTUnwrap(text.box(at: task.at + 6))
-    XCTAssertGreaterThan(label.minX - box.minX, box.width)
-    let window = NSWindow(
-      contentRect: text.frame, styleMask: [.titled], backing: .buffered, defer: false)
-    window.contentView = text
-    let point = text.convert(NSPoint(x: box.midX, y: box.midY), to: nil)
-    let event = try XCTUnwrap(
-      NSEvent.mouseEvent(
-        with: .leftMouseDown, location: point, modifierFlags: [], timestamp: 0,
-        windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)
-    )
-    text.mouseDown(with: event)
-    XCTAssertEqual(book.text, markdown.replacingOccurrences(of: "[ ] example", with: "[x] example"))
-    coordinator.source = true
-    coordinator.style(text)
-    XCTAssertTrue(text.decorations.isEmpty)
-    XCTAssertEqual(text.string, book.text)
-  }
-  @MainActor func testWorkerImageAppearsWithoutChangingMarkdown() async throws {
+  @MainActor func testWorkerImageAppearsInTheEditor() async throws {
     try XCTSkipUnless(ProcessInfo.processInfo.environment["DESCARTES_TEST_DEMO"] == "1")
-    _ = NSApplication.shared
-    // A solid red 60×40 PNG, independent of the system appearance and screen color space.
+    try XCTSkipIf(EditorScheme.bundledRoot() == nil, "Run pnpm test:macos to build the editor.")
     let data = try XCTUnwrap(
       Data(
         base64Encoded:
@@ -106,44 +80,14 @@ final class NotebookTests: XCTestCase {
     upload.setValue("1", forHTTPHeaderField: "X-Descartes-Write")
     let (body, _) = try await URLSession.shared.data(for: upload)
     let path = try XCTUnwrap(JSONDecoder().decode([String: String].self, from: body)["path"])
-    let markdown = "![スクリーンショット](" + path + ")"
-    XCTAssertNotNil(NoteImages.name(in: markdown))
-    XCTAssertNil(
-      NoteImages.name(
-        in: markdown.replacingOccurrences(of: "../assets/", with: "https://example.org/")))
-    let view = NoteText(frame: NSRect(x: 0, y: 0, width: 300, height: 180))
-    let window = NSWindow(
-      contentRect: view.frame, styleMask: [.titled], backing: .buffered, defer: false)
-    window.contentView = view
-    let coord = Editor.Coordinator(Notebook(demo: true))
-    view.string = markdown
-    coord.style(view)
-    for _ in 0..<100 where view.decorations.isEmpty { try await Task.sleep(for: .milliseconds(20)) }
-    for preview in [false, true] {
-      coord.preview = preview
-      coord.style(view)
-      guard case .image = view.decorations.first?.mark else {
-        return XCTFail("Missing image block")
-      }
-      let canvas = NSImage(size: view.bounds.size, flipped: true) { bounds in
-        view.draw(bounds)
-        return true
-      }
-      let bitmap = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(canvas.tiffRepresentation)))
-      let pixel = try XCTUnwrap(bitmap.colorAt(x: 15, y: 20))
-      XCTAssertGreaterThan(pixel.redComponent, 0.95)
-      XCTAssertLessThan(pixel.greenComponent, 0.05)
-      XCTAssertLessThan(pixel.blueComponent, 0.05)
-      XCTAssertGreaterThan(pixel.alphaComponent, 0.95)
-      XCTAssertEqual(view.string, markdown)
+    // The editor fetches it through the app's authenticated asset path (no injected loader).
+    let editor = try await EditorHarness("# T\n![スクリーンショット](" + path + ")")
+    try await editor.until("the uploaded image is decoded") {
+      try await editor.js(
+        "(() => { const i = document.querySelector('img.cm-note-image');"
+          + " return !!i && i.complete && i.naturalWidth === 60 })()") as? Bool == true
     }
-    coord.source = true
-    coord.style(view)
-    XCTAssertTrue(view.decorations.isEmpty)
-    coord.source = false
-    view.string = "```\n" + markdown + "\n```"
-    coord.style(view)
-    XCTAssertTrue(view.decorations.isEmpty)
+    XCTAssertEqual(editor.book.text, "# T\n![スクリーンショット](" + path + ")")
   }
 
   func testWorkerRoundTrip() async throws {

@@ -10,3 +10,4 @@ dist/
 storybook-static/
 debug-storybook.log
 __screenshots__/
+dist-editor/

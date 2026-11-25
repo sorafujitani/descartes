@@ -35,6 +35,8 @@ import SwiftUI
   @Published var query = ""
   @Published var items: [Summary] = []
   let demo: Bool
+  /// The editor page showing this notebook (see Editor.swift).
+  let editor = EditorBridge()
   var timing = Timing()
   private let store: Store
   private var saveTask: Task<Bool, Never>?
@@ -88,6 +90,8 @@ import SwiftUI
     focusRequest += 1
     revision += 1
     UserDefaults.standard.set(document?.id.uuidString, forKey: lastKey)
+    // Show it in the editor page now, not only when SwiftUI next updates the view.
+    editor.sync()
   }
   func start() {
     if let raw = UserDefaults.standard.string(forKey: lastKey), let id = UUID(uuidString: raw) {

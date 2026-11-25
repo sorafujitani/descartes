@@ -44,6 +44,10 @@ function keyboard(keys: string, mod: string) {
     home: mod === "Meta" ? "{Meta>}{ArrowLeft}{/Meta}" : "{Home}",
     end: mod === "Meta" ? "{Meta>}{ArrowRight}{/Meta}" : "{End}",
     "cmd-return": `{${mod}>}{Enter}{/${mod}}`,
+    "cmd-b": `{${mod}>}b{/${mod}}`,
+    "cmd-i": `{${mod}>}i{/${mod}}`,
+    "cmd-l": `{${mod}>}l{/${mod}}`,
+    "cmd-shift-x": `{${mod}>}{Shift>}x{/Shift}{/${mod}}`,
     "alt-up": "{Alt>}{ArrowUp}{/Alt}",
     "alt-down": "{Alt>}{ArrowDown}{/Alt}",
   };

@@ -16,7 +16,7 @@ struct NoteWindow: View {
         HStack(spacing: 8) {
           Spacer()
           Button {
-            NSApp.sendAction(#selector(NoteText.toggleTask), to: nil, from: nil)
+            book.editor.run("task")
           } label: {
             Image(systemName: "checklist")
           }
@@ -57,7 +57,7 @@ struct NoteWindow: View {
           }.help("新規 (⌘N)").accessibilityLabel("新規")
         }.padding(.trailing, 14).opacity(hovering || book.dirty ? 1 : 0.45).disabled(book.busy)
       }.frame(height: 38).onHover { hovering = $0 }
-      Editor(book: book, source: book.source && !book.preview).frame(
+      Editor(book: book).frame(
         maxWidth: .infinity, maxHeight: .infinity)
       HStack {
         Text(
@@ -91,7 +91,7 @@ struct NoteWindow: View {
       }.font(.system(size: 11)).padding(.horizontal, 14).frame(minHeight: 25)
     }
     .buttonStyle(.plain)
-    .foregroundStyle(Color(nsColor: NoteText.ink))
+    .foregroundStyle(Color(nsColor: Theme.text))
     .background(GlassSurface()).tint(Color(nsColor: Theme.accent))
     .ignoresSafeArea()
     .sheet(isPresented: $book.picking) { PickerSheet(book: book).presentationBackground(.clear) }
@@ -141,8 +141,18 @@ struct NoteWindow: View {
     if book.preview {
       editBody()
     } else {
-      NSApp.sendAction(#selector(NoteText.inlineCode), to: nil, from: nil)
+      book.editor.run("code")
     }
+  }
+  /// Editing commands run in the editor page; when it has focus, its own shortcuts handle the
+  /// keys first and these menu items serve mouse use and the ⌘K panel.
+  @objc func editorCommand(_ sender: NSMenuItem) {
+    guard !book.picking, let command = sender.representedObject as? String else { return }
+    book.editor.run(command)
+  }
+  @objc func editorFind(_ sender: NSMenuItem) {
+    guard !book.picking, let action = sender.representedObject as? String else { return }
+    book.editor.find(action)
   }
   @objc func zoomIn() { book.zoom = min(20, book.zoom + 1) }
   @objc func zoomOut() { book.zoom = max(5, book.zoom - 1) }
@@ -207,20 +217,25 @@ struct NoteWindow: View {
     file.addItem(
       withTitle: "ウィンドウを閉じる", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
     let edit = submenu("Edit")
+    // Undo and find belong to the editor page (CodeMirror keeps its own history).
+    for (title, command, key) in [("取り消す", "undo", "z"), ("やり直す", "redo", "Z")] {
+      let item = edit.addItem(
+        withTitle: title, action: #selector(editorCommand(_:)), keyEquivalent: key)
+      item.target = self
+      item.representedObject = command
+    }
     for (title, action, key) in [
-      ("取り消す", "undo:", "z"), ("やり直す", "redo:", "Z"), ("カット", "cut:", "x"), ("コピー", "copy:", "c"),
-      ("ペースト", "paste:", "v"), ("すべてを選択", "selectAll:", "a"),
+      ("カット", "cut:", "x"), ("コピー", "copy:", "c"), ("ペースト", "paste:", "v"),
+      ("すべてを選択", "selectAll:", "a"),
     ] {
       edit.addItem(withTitle: title, action: NSSelectorFromString(action), keyEquivalent: key)
     }
     for (name, key, action) in [
-      ("本文内を検索…", "f", NSTextFinder.Action.showFindInterface),
-      ("次の一致", "g", .nextMatch), ("前の一致", "G", .previousMatch),
+      ("本文内を検索…", "f", "show"), ("次の一致", "g", "next"), ("前の一致", "G", "previous"),
     ] {
-      edit.addItem(
-        withTitle: name, action: #selector(NSTextView.performTextFinderAction(_:)),
-        keyEquivalent: key
-      ).tag = action.rawValue
+      let item = edit.addItem(withTitle: name, action: #selector(editorFind(_:)), keyEquivalent: key)
+      item.target = self
+      item.representedObject = action
     }
     let note = submenu("Note")
     note.addItem(withTitle: "プレビューと編集を切り替える", action: #selector(togglePreview), keyEquivalent: "P")
@@ -228,29 +243,25 @@ struct NoteWindow: View {
     note.addItem(
       withTitle: "インラインコード（プレビュー中は編集に戻る）", action: #selector(codeOrEdit), keyEquivalent: "e"
     ).target = self
-    for (name, key, action, flags) in [
-      (
-        "前の見出し", "[", #selector(NoteText.previousHeading),
-        NSEvent.ModifierFlags([.command, .option])
-      ),
-      ("次の見出し", "]", #selector(NoteText.nextHeading), [.command, .option]),
-      ("ToDoにする／チェックを切り替える", "\r", #selector(NoteText.toggleTask), [.command]),
-      ("リンクを挿入", "l", #selector(NoteText.insertLink), [.command]),
-      ("インラインコード", "`", #selector(NoteText.inlineCode), [.command, .shift]),
-      ("太字", "b", #selector(NoteText.boldSelection), [.command]),
-      ("取り消し線", "x", #selector(NoteText.strikeSelection), [.command, .shift]),
-      (
-        "行を上へ移動", String(Character(UnicodeScalar(NSUpArrowFunctionKey)!)),
-        #selector(NoteText.moveLinesUp), [.option]
-      ),
-      (
-        "行を下へ移動", String(Character(UnicodeScalar(NSDownArrowFunctionKey)!)),
-        #selector(NoteText.moveLinesDown), [.option]
-      ),
-      ("斜体", "i", #selector(NoteText.italicSelection), [.command]),
+    let up = String(Character(UnicodeScalar(NSUpArrowFunctionKey)!))
+    let down = String(Character(UnicodeScalar(NSDownArrowFunctionKey)!))
+    for (name, key, command, flags) in [
+      ("前の見出し", "[", "heading-prev", NSEvent.ModifierFlags([.command, .option])),
+      ("次の見出し", "]", "heading-next", [.command, .option]),
+      ("ToDoにする／チェックを切り替える", "\r", "task", [.command]),
+      ("リンクを挿入", "l", "link", [.command]),
+      ("インラインコード", "`", "code", [.command, .shift]),
+      ("太字", "b", "bold", [.command]),
+      ("斜体", "i", "italic", [.command]),
+      ("取り消し線", "x", "strike", [.command, .shift]),
+      ("行を上へ移動", up, "move-up", [.option]),
+      ("行を下へ移動", down, "move-down", [.option]),
     ] {
-      note.addItem(withTitle: name, action: action, keyEquivalent: key).keyEquivalentModifierMask =
-        flags
+      let item = note.addItem(
+        withTitle: name, action: #selector(editorCommand(_:)), keyEquivalent: key)
+      item.keyEquivalentModifierMask = flags
+      item.target = self
+      item.representedObject = command
     }
     let view = submenu("View")
     for (title, key, action) in [

@@ -21,13 +21,23 @@ export default defineConfig({
     browser: {
       enabled: true,
       headless: true,
-      provider: playwright({
-        // Use full Chromium's new headless mode, not a DOM emulator.
-        launchOptions: { channel: "chromium" },
-      }),
+      provider: playwright(),
       instances: [
-        { browser: "chromium", name: "chromium-mobile", viewport: { width: 390, height: 844 } },
-        { browser: "chromium", name: "chromium-desktop", viewport: { width: 1280, height: 900 } },
+        // Full Chromium's new headless mode, not a DOM emulator.
+        {
+          browser: "chromium",
+          name: "chromium-mobile",
+          viewport: { width: 390, height: 844 },
+          provider: playwright({ launchOptions: { channel: "chromium" } }),
+        },
+        {
+          browser: "chromium",
+          name: "chromium-desktop",
+          viewport: { width: 1280, height: 900 },
+          provider: playwright({ launchOptions: { channel: "chromium" } }),
+        },
+        // The Mac app's editor runs in WKWebView, i.e. WebKit (as does Safari on iOS).
+        { browser: "webkit", name: "webkit-desktop", viewport: { width: 1280, height: 900 } },
       ],
     },
   },

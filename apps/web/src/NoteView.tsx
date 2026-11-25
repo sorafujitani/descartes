@@ -1,11 +1,13 @@
 import { forwardRef, useImperativeHandle, useLayoutEffect, useRef } from "react";
-import { Annotation, Compartment, EditorState } from "@codemirror/state";
+import { Annotation, Compartment, EditorState, Facet } from "@codemirror/state";
 import {
   breakBeforeHeading,
   closeFence,
   continueList,
   deleteMarker,
+  headingCaret,
   imagePath,
+  insertLink,
   indentItem,
   linkAt,
   moveLines,
@@ -14,6 +16,7 @@ import {
   markerEnd,
   todoShortcut,
   toggleTask,
+  wrapSelection,
   type Span,
 } from "@descartes/shared";
 import {
@@ -33,6 +36,8 @@ import {
   indentLess,
   insertNewline,
   insertTab,
+  redo,
+  undo,
 } from "@codemirror/commands";
 import { deleteMarkupBackward, markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting, syntaxTree } from "@codemirror/language";
@@ -44,7 +49,27 @@ export type NoteViewHandle = {
   readonly selectionEnd: number;
   focus(): void;
   setSelectionRange(start: number, end: number): void;
+  /** Runs an editing command (menus, the Mac app's bridge); false when it does not apply. */
+  command(name: EditCommand): boolean;
 };
+/** Editing commands shared by keyboard shortcuts, the web toolbar and the Mac menus. */
+export type EditCommand =
+  | "bold"
+  | "italic"
+  | "strike"
+  | "code"
+  | "link"
+  | "task"
+  | "heading-prev"
+  | "heading-next"
+  | "move-up"
+  | "move-down"
+  | "undo"
+  | "redo";
+/** Where repository images are loaded from (the Mac app serves them through its own scheme). */
+export const assetSource = Facet.define<(name: string) => string, (name: string) => string>({
+  combine: (values) => values[0] ?? ((name) => "/api/assets/" + name),
+});
 const externalChange = Annotation.define<boolean>();
 const persistTask = Annotation.define<boolean>();
 
@@ -154,6 +179,57 @@ function applyEdit(
     scrollIntoView: true,
   });
 }
+/** ⌘Return: make the line(s) todos, or check/uncheck them (which saves like a checkbox click). */
+function toggleTaskCommand(view: EditorView) {
+  if (view.state.readOnly) return true;
+  const previous = view.state.doc.toString();
+  const { from, to } = view.state.selection.main;
+  const next = toggleTask(previous, from, to);
+  if (next) {
+    const toggled = next.text.length === previous.length;
+    view.dispatch({
+      changes: minimalChange(previous, next.text),
+      selection: { anchor: next.start, head: next.end },
+      annotations: toggled ? persistTask.of(true) : [],
+      userEvent: toggled ? "input.task" : "input",
+      scrollIntoView: true,
+    });
+  }
+  return true;
+}
+const delimiters = { bold: "**", italic: "*", strike: "~~", code: "`" } as const;
+export function runCommand(view: EditorView, name: EditCommand): boolean {
+  const previous = view.state.doc.toString();
+  const { from, to } = view.state.selection.main;
+  const span = { start: from, end: to };
+  switch (name) {
+    case "undo":
+      return undo(view);
+    case "redo":
+      return redo(view);
+    case "heading-prev":
+    case "heading-next": {
+      const at = headingCaret(previous, from, name === "heading-next");
+      if (at === undefined) return false;
+      view.dispatch({ selection: { anchor: at }, scrollIntoView: true });
+      return true;
+    }
+  }
+  if (view.state.readOnly) return false;
+  switch (name) {
+    case "task":
+      return toggleTaskCommand(view);
+    case "move-up":
+    case "move-down":
+      return moveSelectedLines(view, name === "move-up");
+    case "link":
+      applyEdit(view, previous, insertLink(previous, span), "input");
+      return true;
+    default:
+      applyEdit(view, previous, wrapSelection(previous, span, delimiters[name]), "input");
+      return true;
+  }
+}
 /** ⌥↑ / ⌥↓ with the same rules as the Mac app. */
 function moveSelectedLines(view: EditorView, up: boolean) {
   if (view.state.readOnly) return true;
@@ -199,7 +275,7 @@ class RepositoryImage extends WidgetType {
   }
   toDOM(view: EditorView) {
     const image = document.createElement("img");
-    image.src = "/api/assets/" + this.name;
+    image.src = view.state.facet(assetSource)(this.name);
     image.alt = this.alt;
     image.className = "cm-note-image";
     image.loading = "lazy";
@@ -336,6 +412,16 @@ const liveMarkdown = ViewPlugin.fromClass(
   { decorations: (plugin) => plugin.decorations },
 );
 
+/** Hidden marks, widgets and their atomic ranges; dropped in raw (source) mode. */
+const liveExtensions = [
+  liveMarkdown,
+  EditorView.atomicRanges.of(
+    (view) =>
+      view.plugin(liveMarkdown)?.decorations.update({
+        filter: (_from, _to, value) => Boolean(value.spec.atomic),
+      }) ?? Decoration.none,
+  ),
+];
 const proseHighlight = HighlightStyle.define([
   { tag: tags.heading1, fontSize: "1.8em", fontWeight: "700", color: "var(--color-text)" },
   { tag: tags.heading2, fontSize: "1.45em", fontWeight: "650", color: "var(--color-text)" },
@@ -461,11 +547,21 @@ export const NoteView = forwardRef<
     onChange: (next: string, persist?: boolean) => void;
     focusAt?: number | null;
     readOnly?: boolean;
+    /** Show the raw Markdown: no hidden marks, widgets or typing shortcuts (Mac source mode). */
+    raw?: boolean;
+    /** Resolves repository image names to URLs; the web app uses /api/assets/. */
+    assetUrl?: (name: string) => string;
   }
->(function NoteView({ markdown: source, onChange, focusAt, readOnly = false }, ref) {
+>(function NoteView(
+  { markdown: source, onChange, focusAt, readOnly = false, raw = false, assetUrl },
+  ref,
+) {
   const root = useRef<HTMLElement>(null);
   const editor = useRef<EditorView | null>(null);
   const access = useRef(new Compartment());
+  const live = useRef(new Compartment());
+  const rawRef = useRef(raw);
+  rawRef.current = raw;
   const change = useRef(onChange);
   change.current = onChange;
   useImperativeHandle(
@@ -497,6 +593,9 @@ export const NoteView = forwardRef<
             scrollIntoView: true,
           });
         }
+      },
+      command(name) {
+        return editor.current ? runCommand(editor.current, name) : false;
       },
     }),
     [],
@@ -542,27 +641,17 @@ export const NoteView = forwardRef<
             { key: "Alt-ArrowDown", run: (view) => moveSelectedLines(view, false) },
             { key: "Home", run: smartLineStart },
             { mac: "Cmd-ArrowLeft", run: smartLineStart },
-            {
-              key: "Mod-Enter",
-              run(view) {
-                if (view.state.readOnly) return true;
-                const previous = view.state.doc.toString();
-                const { from, to } = view.state.selection.main;
-                const next = toggleTask(previous, from, to);
-                if (next) {
-                  // Checking or unchecking saves like a checkbox click; creating a todo is an edit.
-                  const toggled = next.text.length === previous.length;
-                  view.dispatch({
-                    changes: minimalChange(previous, next.text),
-                    selection: { anchor: next.start, head: next.end },
-                    annotations: toggled ? persistTask.of(true) : [],
-                    userEvent: toggled ? "input.task" : "input",
-                    scrollIntoView: true,
-                  });
-                }
-                return true;
-              },
-            },
+            { key: "Mod-Enter", run: toggleTaskCommand },
+            // Formatting lives in the editor's keymap (not only the page), so CodeMirror's own
+            // bindings (⌘I selects the syntax node, ⌘L selects the line) never take these keys,
+            // and the Mac app gets the same shortcuts.
+            { key: "Mod-b", run: (view) => runCommand(view, "bold") },
+            { key: "Mod-i", run: (view) => runCommand(view, "italic") },
+            { key: "Mod-Shift-x", run: (view) => runCommand(view, "strike") },
+            { key: "Mod-Shift-`", run: (view) => runCommand(view, "code") },
+            { key: "Mod-l", run: (view) => runCommand(view, "link") },
+            { key: "Mod-Alt-[", run: (view) => runCommand(view, "heading-prev") },
+            { key: "Mod-Alt-]", run: (view) => runCommand(view, "heading-next") },
           ]),
           markdown({
             base: markdownLanguage,
@@ -573,17 +662,13 @@ export const NoteView = forwardRef<
           }),
           keymap.of([...historyKeymap, ...defaultKeymap]),
           syntaxHighlighting(proseHighlight),
-          liveMarkdown,
+          live.current.of(raw ? [] : liveExtensions),
           noteTheme,
-          EditorView.atomicRanges.of(
-            (view) =>
-              view.plugin(liveMarkdown)?.decorations.update({
-                filter: (_from, _to, value) => Boolean(value.spec.atomic),
-              }) ?? Decoration.none,
-          ),
+          ...(assetUrl ? [assetSource.of(assetUrl)] : []),
           EditorView.inputHandler.of((view, from, to, insert) => {
             const absorb = absorbSpaceAt;
             absorbSpaceAt = null;
+            if (rawRef.current) return false;
             if (from !== to && !view.state.readOnly && !view.composing) {
               const wrapped = wrapOnType(
                 view.state.doc.toString(),
@@ -682,6 +767,9 @@ export const NoteView = forwardRef<
       ]),
     });
   }, [readOnly]);
+  useLayoutEffect(() => {
+    editor.current?.dispatch({ effects: live.current.reconfigure(raw ? [] : liveExtensions) });
+  }, [raw]);
   useLayoutEffect(() => {
     const view = editor.current;
     if (!view || view.state.sliceDoc() === source) return;

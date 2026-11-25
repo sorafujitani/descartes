@@ -4,7 +4,8 @@
   Add `--port 6007` if that port is occupied.
 - `pnpm build-storybook`: local static output in `apps/web/storybook-static`.
 - `pnpm test:storybook`: every story/play function in **real Chromium**, at
-  390×844 and 1280×900. No preview server or external API is needed.
+  390×844 and 1280×900, and in **real WebKit** at 1280×900 (the engine of the Mac
+  app's WKWebView editor and of Safari). No preview server or external API is needed.
 - First-time/CI setup: `pnpm --filter @descartes/web install:browser`.
   Linux CI also needs Playwright's operating-system dependencies installed.
 
@@ -31,7 +32,7 @@ No GitHub, Cloudflare, Access session, private notes or secrets are needed.
 `pnpm run deploy` and `pnpm deploy:check` run `gate:deploy` first (use `run deploy`, not pnpm's built-in workspace `deploy` command):
 
 ```text
-check → unit/DOM tests → Storybook static build → Chromium story/play tests → built-app/CSP smoke tests → cf deploy
+check → unit/DOM tests → Storybook static build → Chromium/WebKit story/play tests → built-app/CSP smoke tests → cf deploy
 ```
 
 Each command is joined with `&&`; a failure prevents Cloudflare deployment.

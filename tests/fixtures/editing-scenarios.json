@@ -1,5 +1,5 @@
 {
-  "about": "Editing scenarios run by both editors: apps/macos/Tests/DescartesTests/EditorScenarioTests.swift (NSTextView) and apps/web/src/EditingScenarios.stories.tsx (CodeMirror in Chromium). `caret` is an index or {\"after\": text}; `select` selects the first occurrence of a text. `keys` is typed character by character; {return} {tab} {backtab} {backspace} {left} {right} {up} {down} {home} {end} {cmd-return} {alt-up} {alt-down} are keys and {paste:TEXT} pastes TEXT. `expect` is the Markdown and `caretAfter` the text just before the final caret.",
+  "about": "Editing scenarios typed into the real CodeMirror editor (apps/web/src/EditingScenarios.stories.tsx) in Chromium and in WebKit, the engine of the Mac app's WKWebView editor. `caret` is an index or {\"after\": text}; `select` selects the first occurrence of a text. `keys` is typed character by character; {return} {tab} {backtab} {backspace} {left} {right} {up} {down} {home} {end} {cmd-return} {alt-up} {alt-down} {cmd-b} {cmd-i} {cmd-l} {cmd-shift-x} are keys and {paste:TEXT} pastes TEXT. `expect` is the Markdown and `caretAfter` the text just before the final caret.",
   "scenarios": [
     {
       "name": "type a whole code block, closing fence included",
@@ -303,6 +303,34 @@
       },
       "keys": "{cmd-return}{return}三",
       "expect": "# T\n1. [x] 一\n2. [ ] 三\n3. [ ] 二"
+    },
+    {
+      "name": "command-b and command-i wrap the selection",
+      "doc": "# T\n太字 斜体",
+      "select": "太字",
+      "keys": "{cmd-b}",
+      "expect": "# T\n**太字** 斜体"
+    },
+    {
+      "name": "command-i makes italics (not CodeMirror's select-parent)",
+      "doc": "# T\n斜体",
+      "select": "斜体",
+      "keys": "{cmd-i}",
+      "expect": "# T\n*斜体*"
+    },
+    {
+      "name": "command-shift-x makes strikethrough",
+      "doc": "# T\n消す",
+      "select": "消す",
+      "keys": "{cmd-shift-x}",
+      "expect": "# T\n~~消す~~"
+    },
+    {
+      "name": "command-l inserts a link and selects its URL",
+      "doc": "# T\nサイト",
+      "select": "サイト",
+      "keys": "{cmd-l}https://e.com",
+      "expect": "# T\n[サイト](https://e.com)"
     }
   ]
 }
