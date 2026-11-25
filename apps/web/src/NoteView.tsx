@@ -351,9 +351,16 @@ function taskDecorations(view: EditorView): DecorationSet {
           }
         }
         if (node.name === "ListMark") {
-          // Wrapped item text lines up after its dot, checkbox or number (as in the Mac app).
+          // Wrapped item text lines up after its dot, checkbox or number. Nesting is shown by
+          // the list depth (a clear step per level), not by the width of the leading spaces.
           const line = view.state.doc.lineAt(node.from);
-          const indent = Math.min(12, node.from - line.from);
+          let depth = -1;
+          for (let parent = node.node.parent; parent; parent = parent.parent)
+            if (parent.name === "BulletList" || parent.name === "OrderedList") depth++;
+          const indent = Math.max(0, Math.min(maxDepth, depth));
+          const leading = view.state.doc.sliceString(line.from, node.from);
+          if (leading && /^[ \t]+$/.test(leading))
+            ranges.push(Decoration.replace({ atomic: true }).range(line.from, node.from));
           const mark = view.state.doc.sliceString(node.from, node.to);
           const task = /^[ \t]+\[[ xX]\]/.test(view.state.doc.sliceString(node.to, node.to + 5));
           const digits = mark.length - 1;
@@ -381,7 +388,7 @@ function taskDecorations(view: EditorView): DecorationSet {
             if (/^[ \t]*$/.test(prefix))
               ranges.push(
                 Decoration.line({
-                  class: `cm-quote cm-hang-b-${Math.min(12, node.from - line.from)}`,
+                  class: "cm-quote cm-hang-b-0",
                 }).range(line.from),
               );
             ranges.push(quoteBar.range(node.from, node.to + space));
@@ -528,19 +535,21 @@ const proseHighlight = HighlightStyle.define([
 ]);
 /** Hanging indents per indentation (CSP forbids inline styles, so these are classes). */
 const hangingIndents: Record<string, { paddingLeft: string; textIndent: string }> = {};
+/** Each nesting level steps in by about one marker width, so levels are easy to tell apart. */
+const nestingStep = "1.5rem";
+const maxDepth = 8;
 for (const [kind, width] of [
   ["b", "1.45rem"],
   ["o2", "1.95rem"],
   ["o3", "2.45rem"],
 ] as const)
-  for (let indent = 0; indent <= 12; indent++) {
-    const hang = `calc(${indent} * 0.28em + ${width})`;
-    // ".cm-line." outranks the theme's own ".cm-line" padding.
-    hangingIndents[`.cm-line.cm-hang-${kind}-${indent}`] = {
-      paddingLeft: hang,
-      textIndent: `calc(-1 * ${hang})`,
+  for (let depth = 0; depth <= maxDepth; depth++)
+    // ".cm-line." outranks the theme's own ".cm-line" padding. The first line starts at the
+    // depth's indent with the marker; wrapped lines start after the marker.
+    hangingIndents[`.cm-line.cm-hang-${kind}-${depth}`] = {
+      paddingLeft: `calc(${depth} * ${nestingStep} + ${width})`,
+      textIndent: `calc(-1 * ${width})`,
     };
-  }
 const noteTheme = EditorView.theme({
   ...hangingIndents,
   "&": { backgroundColor: "transparent", color: "var(--color-text)", fontSize: "1rem" },

@@ -279,5 +279,17 @@ export const LivePreviewLayout: StoryObj<typeof meta> = {
       )!;
       await expect(Math.abs(wrapped.left - first.left)).toBeLessThan(1.5);
     }
+    // Nesting is easy to see: every level moves the marker clearly to the right (it used to be
+    // only the width of the two leading spaces).
+    const nested = "# T\n- 一\n  - 二\n    - 三\n- [ ] 四\n  - [ ] 五\n1. 六\n   1. 七";
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: nested } });
+    const textX = (label: string) => view.coordsAtPos(nested.indexOf(label), 1)!.left;
+    for (const [parent, child] of [
+      ["一", "二"],
+      ["二", "三"],
+      ["四", "五"],
+      ["六", "七"],
+    ])
+      await expect(textX(child) - textX(parent)).toBeGreaterThan(20);
   },
 };
