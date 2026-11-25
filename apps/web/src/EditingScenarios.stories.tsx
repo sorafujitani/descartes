@@ -44,6 +44,8 @@ function keyboard(keys: string, mod: string) {
     home: mod === "Meta" ? "{Meta>}{ArrowLeft}{/Meta}" : "{Home}",
     end: mod === "Meta" ? "{Meta>}{ArrowRight}{/Meta}" : "{End}",
     "cmd-return": `{${mod}>}{Enter}{/${mod}}`,
+    "alt-up": "{Alt>}{ArrowUp}{/Alt}",
+    "alt-down": "{Alt>}{ArrowDown}{/Alt}",
   };
   return keys.replace(/\{([a-z-]+)\}|([[{])|([^[{]+)/g, (_, name, special, text) =>
     name ? named[name] : special ? special + special : text,
@@ -77,7 +79,18 @@ export const SharedScenarios: StoryObj<typeof meta> = {
       }
       view.focus();
       view.dispatch({ selection: { anchor, head } });
-      await userEvent.keyboard(keyboard(scenario.keys, mod));
+      // "{paste:TEXT}" pastes; everything else is typed.
+      for (const part of scenario.keys.split(/(\{paste:[^}]*\})/)) {
+        const paste = /^\{paste:([^}]*)\}$/.exec(part);
+        if (paste) {
+          // A real paste event, as the browser sends for ⌘V; the editor reads clipboardData.
+          const data = new DataTransfer();
+          data.setData("text/plain", paste[1]);
+          view.contentDOM.dispatchEvent(
+            new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }),
+          );
+        } else if (part) await userEvent.keyboard(keyboard(part, mod));
+      }
       const doc = view.state.doc.toString();
       if (doc !== scenario.expect)
         failures.push(
@@ -119,5 +132,88 @@ export const CodeBlockFences: StoryObj<typeof meta> = {
     await userEvent.keyboard("{End}{Backspace}{Backspace}ts{ArrowDown}");
     await waitFor(() => expect(content()).not.toContain("```"));
     await expect(view.state.doc.toString()).toBe("# T\n```ts\nconsole.log(1)\n```\n後");
+  },
+};
+
+/** Quotes, numbered todos, strikethrough and ⌘-click links, as in the Mac app. */
+export const RichMarkdown: StoryObj<typeof meta> = {
+  play: async ({ canvasElement, userEvent }) => {
+    const dom = await waitFor(() => {
+      const editor = canvasElement.querySelector<HTMLElement>(".cm-editor");
+      if (!editor) throw new Error("editor not mounted");
+      return editor;
+    });
+    const view = EditorView.findFromDOM(dom)!;
+    const doc =
+      "# T\n1. [ ] 一\n2. [x] 二\n> 引用\n~~消す~~\n[サイト](https://example.com/a)\n末尾";
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: doc } });
+    view.focus();
+    view.dispatch({ selection: { anchor: doc.length } });
+    await waitFor(() => expect(dom.querySelectorAll(".cm-task-checkbox")).toHaveLength(2));
+    await expect(dom.querySelectorAll(".cm-quote-bar")).toHaveLength(1);
+    await expect(dom.querySelector(".cm-content")!.textContent).not.toContain("> 引用");
+    // Backspace right after the hidden "> " removes the quote marker.
+    view.dispatch({ selection: { anchor: doc.indexOf("引用") } });
+    await userEvent.keyboard("{Backspace}");
+    await expect(view.state.doc.toString()).toContain("\n引用\n");
+    // ⌘-click (Ctrl-click elsewhere) on a link opens it; a plain click only moves the caret.
+    const opened: string[] = [];
+    const open = window.open;
+    window.open = ((url?: string | URL) => {
+      opened.push(String(url));
+      return null;
+    }) as typeof window.open;
+    try {
+      const at = view.state.doc.toString().indexOf("サイト") + 1;
+      const point = view.coordsAtPos(at)!;
+      const press = (modifier: boolean) =>
+        view.contentDOM.dispatchEvent(
+          new MouseEvent("mousedown", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            clientX: point.left + 1,
+            clientY: (point.top + point.bottom) / 2,
+            metaKey: modifier && /Mac/.test(navigator.platform),
+            ctrlKey: modifier && !/Mac/.test(navigator.platform),
+          }),
+        );
+      press(false);
+      await expect(opened).toEqual([]);
+      press(true);
+      await expect(opened).toEqual(["https://example.com/a"]);
+    } finally {
+      window.open = open;
+    }
+  },
+};
+
+/** Re-rendering (e.g. on blur) must not reuse a checkbox element for a bullet. */
+export const WidgetsKeepTheirKind: StoryObj<typeof meta> = {
+  play: async ({ canvasElement }) => {
+    const dom = await waitFor(() => {
+      const editor = canvasElement.querySelector<HTMLElement>(".cm-editor");
+      if (!editor) throw new Error("editor not mounted");
+      return editor;
+    });
+    const view = EditorView.findFromDOM(dom)!;
+    const doc = "# 買い物メモ\n1. [ ] 牛乳\n- 箇条書き\n  - ネスト\n> 引用";
+    // Start from a note whose checkbox sits where the new note has a nested bullet, then
+    // replace it through browser input, as typing or pasting does (not a transaction).
+    view.dispatch({
+      changes: {
+        from: 0,
+        to: view.state.doc.length,
+        insert: "# T\n- 箇条書き\n  * ネスト\n- [ ] ToDo\n1. 番号",
+      },
+    });
+    view.focus();
+    view.dispatch({ selection: { anchor: 0, head: view.state.doc.length } });
+    document.execCommand("insertText", false, doc);
+    await waitFor(() => expect(view.state.doc.toString()).toBe(doc));
+    view.contentDOM.blur();
+    await waitFor(() => expect(dom.querySelectorAll(".cm-bullet")).toHaveLength(2));
+    await expect(dom.querySelectorAll(".cm-task-checkbox")).toHaveLength(1);
+    await expect(dom.querySelectorAll(".cm-quote-bar")).toHaveLength(1);
   },
 };

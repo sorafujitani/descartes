@@ -16,6 +16,7 @@ export type Action =
   | "outdent"
   | "task"
   | "bold"
+  | "strike"
   | "italic"
   | "code"
   | "link"
@@ -30,6 +31,7 @@ export function actionFor(event: KeyboardEvent): Action | null {
   if (meta && event.altKey && key === "[") return "heading-prev";
   if (meta && event.altKey && key === "]") return "heading-next";
   if (meta && event.shiftKey && key === "`") return "code";
+  if (meta && event.shiftKey && key.toLowerCase() === "x") return "strike";
   if (meta && event.shiftKey && key.toLowerCase() === "g") return "find-prev";
   if (!meta) {
     if (key === "Enter" && !event.shiftKey && !event.altKey) return "continue";

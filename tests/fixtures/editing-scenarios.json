@@ -1,5 +1,5 @@
 {
-  "about": "Editing scenarios run by both editors: apps/macos/Tests/DescartesTests/EditorScenarioTests.swift (NSTextView) and apps/web/src/EditingScenarios.stories.tsx (CodeMirror in Chromium). `caret` is an index or {\"after\": text}; `select` selects the first occurrence of a text. `keys` is typed character by character; {return} {tab} {backtab} {backspace} {left} {right} {up} {down} {home} {end} {cmd-return} are keys. `expect` is the Markdown and `caretAfter` the text just before the final caret.",
+  "about": "Editing scenarios run by both editors: apps/macos/Tests/DescartesTests/EditorScenarioTests.swift (NSTextView) and apps/web/src/EditingScenarios.stories.tsx (CodeMirror in Chromium). `caret` is an index or {\"after\": text}; `select` selects the first occurrence of a text. `keys` is typed character by character; {return} {tab} {backtab} {backspace} {left} {right} {up} {down} {home} {end} {cmd-return} {alt-up} {alt-down} are keys and {paste:TEXT} pastes TEXT. `expect` is the Markdown and `caretAfter` the text just before the final caret.",
   "scenarios": [
     {
       "name": "type a whole code block, closing fence included",
@@ -218,6 +218,91 @@
       },
       "keys": "```{return}c",
       "expect": "# T\n```\na\n```\n```\nc\n```\n本文\n```\nb\n```"
+    },
+    {
+      "name": "typing * over a selection wraps it, twice makes bold",
+      "doc": "# T\n日本語 text",
+      "select": "日本語",
+      "keys": "**",
+      "expect": "# T\n**日本語** text"
+    },
+    {
+      "name": "typing ~ over a selection makes strikethrough",
+      "doc": "# T\n消す",
+      "select": "消す",
+      "keys": "~",
+      "expect": "# T\n~~消す~~"
+    },
+    {
+      "name": "typing [ over a selection makes a link and puts the caret in its URL",
+      "doc": "# T\nサイト",
+      "select": "サイト",
+      "keys": "[https://e.com",
+      "expect": "# T\n[サイト](https://e.com)",
+      "caretAfter": "https://e.com"
+    },
+    {
+      "name": "typing * over a selection in code replaces it",
+      "doc": "# T\n```\ncode\n```",
+      "select": "code",
+      "keys": "*",
+      "expect": "# T\n```\n*\n```"
+    },
+    {
+      "name": "pasting a URL over selected text makes a link",
+      "doc": "# T\n公式サイト を見る",
+      "select": "公式サイト",
+      "keys": "{paste:https://example.com/docs}",
+      "expect": "# T\n[公式サイト](https://example.com/docs) を見る",
+      "caretAfter": "docs)"
+    },
+    {
+      "name": "pasting plain text over a selection replaces it",
+      "doc": "# T\nold",
+      "select": "old",
+      "keys": "{paste:new}",
+      "expect": "# T\nnew"
+    },
+    {
+      "name": "return in the middle of an ordered list renumbers the rest",
+      "doc": "# T\n1. 一\n2. 二\n3. 三",
+      "caret": {
+        "after": "一"
+      },
+      "keys": "{return}新",
+      "expect": "# T\n1. 一\n2. 新\n3. 二\n4. 三"
+    },
+    {
+      "name": "option-up and option-down move the current line",
+      "doc": "# T\n- a\n- b\n- c",
+      "caret": {
+        "after": "- c"
+      },
+      "keys": "{alt-up}{alt-up}",
+      "expect": "# T\n- c\n- a\n- b",
+      "caretAfter": "- c"
+    },
+    {
+      "name": "option-down moves a selection of lines",
+      "doc": "# T\n一\n二\n三",
+      "select": "一\n二",
+      "keys": "{alt-down}",
+      "expect": "# T\n三\n一\n二"
+    },
+    {
+      "name": "quotes hide their marker; backspace after it removes it",
+      "doc": "# T\n> 引用",
+      "keys": "{home}{backspace}",
+      "expect": "# T\n引用"
+    },
+    {
+      "name": "command-return on a numbered todo toggles it",
+      "doc": "# T\n1. [ ] 一\n2. [ ] 二",
+      "caret": {
+        "after": "一"
+      },
+      "keys": "{cmd-return}{return}三",
+      "expect": "# T\n1. [x] 一\n2. [ ] 三\n3. [ ] 二"
     }
   ]
 }

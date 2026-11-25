@@ -169,6 +169,9 @@ struct NoteWindow: View {
       "Return（見出しの先頭）：見出しの上に空行を入れる",
       "チェックボックスをクリック：チェックを切り替える（プレビュー中も可）",
       "⌘←：箇条書き・チェックの直後へ、もう一度で行頭へ",
+      "選択して * _ ` ~ [：選択した文字を記号で囲む（[ はリンク）",
+      "URLを選択した文字に貼り付け：リンク [文字](URL) にする",
+      "⌘クリック：リンクを開く",
       "⌫：行頭の箇条書き・チェック記号をまとめて削除",
       "文書検索：↑↓で選択、Returnで開く、Escで閉じる",
     ] {
@@ -235,6 +238,15 @@ struct NoteWindow: View {
       ("リンクを挿入", "l", #selector(NoteText.insertLink), [.command]),
       ("インラインコード", "`", #selector(NoteText.inlineCode), [.command, .shift]),
       ("太字", "b", #selector(NoteText.boldSelection), [.command]),
+      ("取り消し線", "x", #selector(NoteText.strikeSelection), [.command, .shift]),
+      (
+        "行を上へ移動", String(Character(UnicodeScalar(NSUpArrowFunctionKey)!)),
+        #selector(NoteText.moveLinesUp), [.option]
+      ),
+      (
+        "行を下へ移動", String(Character(UnicodeScalar(NSDownArrowFunctionKey)!)),
+        #selector(NoteText.moveLinesDown), [.option]
+      ),
       ("斜体", "i", #selector(NoteText.italicSelection), [.command]),
     ] {
       note.addItem(withTitle: name, action: action, keyEquivalent: key).keyEquivalentModifierMask =

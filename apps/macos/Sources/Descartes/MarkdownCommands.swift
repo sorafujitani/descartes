@@ -206,6 +206,170 @@ extension NoteText {
     setSelectedRange(NSRange(location: caret + newline.utf16.count, length: 0))
     return true
   }
+  /// Replaces the document with `next` as one minimal edit (one undo step; local restyling when
+  /// the change stays within a line) and selects `selection`. Bypasses typing shortcuts.
+  func apply(_ next: String, selection: NSRange) {
+    let old = string as NSString
+    let new = next as NSString
+    var start = 0
+    let shorter = min(old.length, new.length)
+    while start < shorter, old.character(at: start) == new.character(at: start) { start += 1 }
+    var oldEnd = old.length
+    var newEnd = new.length
+    while oldEnd > start, newEnd > start,
+      old.character(at: oldEnd - 1) == new.character(at: newEnd - 1)
+    {
+      oldEnd -= 1
+      newEnd -= 1
+    }
+    // Never split a surrogate pair or composed character.
+    if start < old.length { start = old.rangeOfComposedCharacterSequence(at: start).location }
+    if start < new.length {
+      start = min(start, new.rangeOfComposedCharacterSequence(at: start).location)
+    }
+    if oldEnd > start, oldEnd < old.length {
+      let extra = NSMaxRange(old.rangeOfComposedCharacterSequence(at: oldEnd - 1)) - oldEnd
+      oldEnd += extra
+      newEnd += extra
+    }
+    if oldEnd > start || newEnd > start {
+      applyingCommand = true
+      insertText(
+        new.substring(with: NSRange(location: start, length: newEnd - start)),
+        replacementRange: NSRange(location: start, length: oldEnd - start))
+      applyingCommand = false
+    }
+    setSelectedRange(selection)
+  }
+  private static let orderedItem = try? NSRegularExpression(
+    pattern: #"^([ \t]*)([0-9]{1,9})([.)])(?=[ \t]|$)"#)
+  /// Renumbers the ordered items after the one containing `location` (same indentation and
+  /// delimiter; deeper lines are skipped). Mirrors `renumberAfter` in packages/shared.
+  static func renumbered(_ text: String, after location: Int) -> String {
+    var lines = text.components(separatedBy: "\n")
+    var index = ((text as NSString).substring(to: location) as String)
+      .components(separatedBy: "\n").count - 1
+    func item(_ line: String) -> (indent: String, number: Int, delimiter: String, rest: String)? {
+      let raw = line as NSString
+      guard
+        let match = orderedItem?.firstMatch(
+          in: line, range: NSRange(location: 0, length: raw.length))
+      else { return nil }
+      return (
+        raw.substring(with: match.range(at: 1)), Int(raw.substring(with: match.range(at: 2))) ?? 0,
+        raw.substring(with: match.range(at: 3)), raw.substring(from: NSMaxRange(match.range(at: 2)))
+      )
+    }
+    guard index < lines.count, let first = item(lines[index]) else { return text }
+    var number = first.number
+    index += 1
+    while index < lines.count {
+      let line = lines[index]
+      let indent = line.prefix(while: { $0 == " " || $0 == "\t" })
+      if indent.utf16.count > first.indent.utf16.count,
+        !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      {
+        index += 1
+        continue
+      }
+      guard let next = item(line), next.indent == first.indent, next.delimiter == first.delimiter
+      else { break }
+      number += 1
+      lines[index] = next.indent + String(number) + next.rest
+      index += 1
+    }
+    return lines.joined(separator: "\n")
+  }
+  /// Typing *, _, `, ~ or [ while text on one line is selected wraps it (~ → ~~, [ → link with
+  /// the caret in its URL). Mirrors `wrapOnType` in packages/shared.
+  func wrapOnType(_ typed: String) -> Bool {
+    let pairs: [String: (String, String)] = [
+      "*": ("*", "*"), "_": ("_", "_"), "`": ("`", "`"), "~": ("~~", "~~"), "[": ("[", "]()"),
+    ]
+    let selection = selectedRange()
+    guard let (open, close) = pairs[typed], selection.length > 0, !hasMarkedText(),
+      !currentLine.code
+    else { return false }
+    let raw = string as NSString
+    let selected = raw.substring(with: selection)
+    guard !selected.contains("\n"), !selected.contains("\r") else { return false }
+    let next = raw.replacingCharacters(in: selection, with: open + selected + close)
+    let caret = NSMaxRange(selection) + open.utf16.count + 2
+    apply(
+      next,
+      selection: typed == "["
+        ? NSRange(location: caret, length: 0)
+        : NSRange(location: selection.location + open.utf16.count, length: selection.length))
+    return true
+  }
+  /// Pasting a URL over selected text on one line makes it a link. Mirrors `pasteLink`.
+  func pasteLink(_ pasted: String) -> Bool {
+    let url = pasted.trimmingCharacters(in: .whitespacesAndNewlines)
+    let selection = selectedRange()
+    guard isEditable, !hasMarkedText(), selection.length > 0, !currentLine.code,
+      url.range(of: #"^https?://[^\s<>()]+$"#, options: .regularExpression) != nil
+    else { return false }
+    let raw = string as NSString
+    let selected = raw.substring(with: selection)
+    guard !selected.contains("\n"), !selected.contains("\r"),
+      selected.trimmingCharacters(in: .whitespaces).range(
+        of: #"^https?://"#, options: .regularExpression) == nil
+    else { return false }
+    let link = "[" + selected + "](" + url + ")"
+    apply(
+      raw.replacingCharacters(in: selection, with: link),
+      selection: NSRange(location: selection.location + link.utf16.count, length: 0))
+    return true
+  }
+  override func paste(_ sender: Any?) {
+    if let text = NSPasteboard.general.string(forType: .string), pasteLink(text) { return }
+    super.paste(sender)
+  }
+  @objc func moveLinesUp() { moveLines(up: true) }
+  @objc func moveLinesDown() { moveLines(up: false) }
+  /// ⌥↑ / ⌥↓ move the selected lines. Mirrors `moveLines` in packages/shared.
+  private func moveLines(up: Bool) {
+    guard isEditable, !hasMarkedText() else { return }
+    let text = string
+    let raw = text as NSString
+    let selection = selectedRange()
+    var lines = text.components(separatedBy: "\n")
+    let first = raw.substring(to: selection.location).components(separatedBy: "\n").count - 1
+    var end = NSMaxRange(selection)
+    if selection.length > 0, raw.character(at: end - 1) == 10 { end -= 1 }
+    let last = raw.substring(to: end).components(separatedBy: "\n").count - 1
+    guard up ? first > 0 : last < lines.count - 1 else { return }
+    let block = Array(lines[first...last])
+    let other = up ? lines[first - 1] : lines[last + 1]
+    let shift = (other.utf16.count + 1) * (up ? -1 : 1)
+    if up {
+      lines.replaceSubrange((first - 1)...last, with: block + [other])
+    } else {
+      lines.replaceSubrange(first...(last + 1), with: [other] + block)
+    }
+    apply(
+      lines.joined(separator: "\n"),
+      selection: NSRange(location: selection.location + shift, length: selection.length))
+  }
+  /// The URL of a Markdown link or bare URL at `index`, for ⌘-click. Mirrors `linkAt`.
+  func link(at index: Int) -> URL? {
+    let raw = string as NSString
+    guard index <= raw.length else { return nil }
+    let range = raw.lineRange(for: NSRange(location: min(index, raw.length), length: 0))
+    let line = raw.substring(with: range)
+    let offset = index - range.location
+    guard
+      let pattern = try? NSRegularExpression(
+        pattern: #"\[[^\]\n]*\]\((https?://[^\s)]+)\)|https?://[^\s<>()]+"#)
+    else { return nil }
+    for match in pattern.matches(in: line, range: NSRange(location: 0, length: (line as NSString).length))
+    where offset >= match.range.location && offset <= NSMaxRange(match.range) {
+      let target = match.range(at: 1).location == NSNotFound ? match.range : match.range(at: 1)
+      return URL(string: (line as NSString).substring(with: target))
+    }
+    return nil
+  }
+  @objc func strikeSelection() { wrap("~~") }
   func continueList() -> Bool {
     guard isEditable, !hasMarkedText(), selectedRange().length == 0 else { return false }
     let (range, line, code) = currentLine
@@ -216,7 +380,11 @@ extension NoteText {
       if !item.indent.isEmpty { return indentItem(outdent: true) }
       insertText("", replacementRange: NSRange(location: range.location, length: item.length))
     } else {
-      insertText(lineBreak + item.next, replacementRange: selectedRange())
+      let caret = selectedRange().location
+      let inserted = (string as NSString).replacingCharacters(
+        in: selectedRange(), with: lineBreak + item.next)
+      let at = caret + (lineBreak + item.next).utf16.count
+      apply(Self.renumbered(inserted, after: at), selection: NSRange(location: at, length: 0))
     }
     return true
   }

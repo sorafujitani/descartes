@@ -424,9 +424,15 @@ export function App({
         if (!next) return;
         event.preventDefault();
         edit(next);
-      } else if (action === "bold" || action === "italic" || action === "code") {
+      } else if (
+        action === "bold" ||
+        action === "italic" ||
+        action === "code" ||
+        action === "strike"
+      ) {
         event.preventDefault();
-        edit(wrapSelection(body, span, action === "bold" ? "**" : action === "italic" ? "*" : "`"));
+        const delimiters = { bold: "**", italic: "*", code: "`", strike: "~~" } as const;
+        edit(wrapSelection(body, span, delimiters[action]));
       } else if (action === "link") {
         event.preventDefault();
         edit(insertLink(body, span));

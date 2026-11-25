@@ -52,6 +52,8 @@ final class NoteText: NSTextView {
   /// After "[]" becomes "- [ ] ", the space typed next would double the separator.
   var swallowSpaceAt: Int?
   private var movingBackward = false
+  /// Set while a command applies its own edit, so typing shortcuts do not re-run on it.
+  var applyingCommand = false
 
   override func insertText(_ insertString: Any, replacementRange: NSRange) {
     let typed = (insertString as? NSAttributedString)?.string ?? insertString as? String ?? ""
@@ -62,8 +64,14 @@ final class NoteText: NSTextView {
     {
       return
     }
+    if autoFormat, !applyingCommand, typed.utf16.count == 1,
+      replacementRange.location == NSNotFound || replacementRange == selectedRange(),
+      wrapOnType(typed)
+    {
+      return
+    }
     super.insertText(insertString, replacementRange: replacementRange)
-    if autoFormat, ["]", "］", "」"].contains(where: { typed.hasSuffix($0) }) {
+    if autoFormat, !applyingCommand, ["]", "］", "」"].contains(where: { typed.hasSuffix($0) }) {
       completeTodoShortcut()
     }
   }
@@ -217,7 +225,7 @@ final class NoteText: NSTextView {
   }
   enum Mark {
     case task(Bool)
-    case bullet, rule
+    case bullet, rule, quote
     case image(NSImage, CGFloat)
   }
   struct Decoration {
@@ -317,6 +325,13 @@ final class NoteText: NSTextView {
         NSBezierPath(
           ovalIn: NSRect(x: rect.minX + 3 * s, y: rect.midY - dot / 2, width: dot, height: dot)
         ).fill()
+      case .quote:
+        guard let line = block(at: decoration.at) else { continue }
+        Theme.border.setFill()
+        NSBezierPath(
+          roundedRect: NSRect(x: line.minX + 1 * s, y: line.minY + 2 * s, width: 3 * s,
+            height: max(1, line.height - 4 * s)), xRadius: 1.5 * s, yRadius: 1.5 * s
+        ).fill()
       case .rule:
         guard let line = block(at: decoration.at) else { continue }
         Self.muted.withAlphaComponent(0.45).setFill()
@@ -344,12 +359,25 @@ final class NoteText: NSTextView {
     let selection = selectedRanges
     let readOnly = !isEditable
     if readOnly { isEditable = true }
-    insertText(checked ? " " : "x", replacementRange: NSRange(location: marker + 3, length: 1))
+    // "- [ ] " and "1. [ ] " both: the box is the character after the first "[".
+    let raw = string as NSString
+    let line = raw.lineRange(for: NSRange(location: marker, length: 0))
+    let bracket = raw.range(
+      of: "[", range: NSRange(location: marker, length: NSMaxRange(line) - marker))
+    guard bracket.location != NSNotFound else { return }
+    insertText(
+      checked ? " " : "x", replacementRange: NSRange(location: bracket.location + 1, length: 1))
     selectedRanges = selection
     if readOnly { isEditable = false }
   }
   override func mouseDown(with event: NSEvent) {
-    if let task = task(at: convert(event.locationInWindow, from: nil)) {
+    let point = convert(event.locationInWindow, from: nil)
+    // ⌘-click opens a link, as on the web.
+    if event.modifierFlags.contains(.command), let url = link(at: characterIndexForInsertion(at: point)) {
+      NSWorkspace.shared.open(url)
+      return
+    }
+    if let task = task(at: point) {
       toggleBox(at: task.at, checked: task.checked)
       return
     }
@@ -433,7 +461,7 @@ struct Editor: NSViewRepresentable {
     private static let urls = try? NSRegularExpression(pattern: #"https?://[^\s<>]+"#)
     private static let spans = try? NSRegularExpression(
       pattern:
-        #"(?<!\\)(`)([^`]+)`|(\*\*)([^*]+)\*\*|(\*)([^*]+)\*|\[([^\]]+)\]\((https?://[^\s)]+)\)"#
+        #"(?<!\\)(`)([^`]+)`|(\*\*)([^*]+)\*\*|(\*)([^*]+)\*|\[([^\]]+)\]\((https?://[^\s)]+)\)|(~~)([^~]+)~~|(?<![\p{L}\p{N}_])(_)([^_]+)_(?![\p{L}\p{N}_])"#
     )
     var images = NoteImages()
     var zoom = 10
@@ -542,7 +570,7 @@ struct Editor: NSViewRepresentable {
           in: line, range: NSRange(location: 0, length: line.utf16.count)
         ) { match, _, _ in
           guard let match else { return }
-          let groups = [2, 4, 6, 7]
+          let groups = [2, 4, 6, 7, 10, 12]
           guard let group = groups.first(where: { match.range(at: $0).location != NSNotFound })
           else { return }
           let inner = match.range(at: group)
@@ -557,7 +585,13 @@ struct Editor: NSViewRepresentable {
           case 4:
             storage.addAttribute(
               .font, value: NSFont.boldSystemFont(ofSize: 14 * self.scale), range: visible)
-          case 6:
+          case 10:
+            storage.addAttributes(
+              [
+                .strikethroughStyle: NSUnderlineStyle.single.rawValue,
+                .strikethroughColor: Theme.muted, .foregroundColor: Theme.muted,
+              ], range: visible)
+          case 6, 12:
             storage.addAttribute(
               .font,
               value: NSFontManager.shared.convert(
@@ -647,6 +681,7 @@ struct Editor: NSViewRepresentable {
       let at = prose.at
       let level = content.prefix(while: { $0 == "#" }).count
       var hanging = false
+      var hangingWidth: CGFloat?
       if (1...6).contains(level) && content.dropFirst(level).first == " " {
         storage.addAttribute(
           .font,
@@ -655,24 +690,42 @@ struct Editor: NSViewRepresentable {
         storage.addAttribute(.foregroundColor, value: Theme.heading, range: range)
         storage.removeAttribute(NoteText.uniformLine, range: range)
         marker(level + 1, nil)
-      } else if [
-        "- [ ] ", "- [x] ", "- [X] ", "* [ ] ", "* [x] ", "* [X] ", "+ [ ] ", "+ [x] ",
-        "+ [X] ",
-      ].contains(where: { content.hasPrefix($0) }) {
-        let checked =
-          !content.hasPrefix("- [ ]") && !content.hasPrefix("* [ ]")
-          && !content.hasPrefix("+ [ ]")
-        marker(6, .task(checked))
-        let labelLength = content.utf16.count - 6
+      } else if let task = content.range(
+        of: #"^(?:[-*+]|[0-9]{1,9}[.)]) \[[ xX]\] "#, options: .regularExpression)
+      {
+        // Bullet and numbered todos ("- [ ] ", "1. [ ] ") both show only the checkbox, as on
+        // the web.
+        let prefix = content[task]
+        let length = prefix.utf16.count
+        let checked = !prefix.contains("[ ]")
+        marker(length, .task(checked))
+        let labelLength = content.utf16.count - length
         if checked, !source, labelLength > 0 {
           storage.addAttributes(
             [
               .foregroundColor: Theme.muted,
               .strikethroughStyle: NSUnderlineStyle.single.rawValue,
               .strikethroughColor: Theme.muted,
-            ], range: NSRange(location: start + 6, length: labelLength))
+            ], range: NSRange(location: start + length, length: labelLength))
         }
         hanging = true
+      } else if content.hasPrefix("> ") || content == ">" {
+        // The first "> " becomes a quote bar; the quoted text is quieter.
+        let length = content == ">" ? 1 : 2
+        marker(length, .quote)
+        if !source, content.utf16.count > length {
+          storage.addAttribute(
+            .foregroundColor, value: Theme.muted,
+            range: NSRange(location: start + length, length: content.utf16.count - length))
+        }
+        hanging = true
+      } else if let number = content.range(
+        of: #"^[0-9]{1,9}[.)] "#, options: .regularExpression), !source
+      {
+        // Wrapped text of a numbered item lines up after its number.
+        let font = NSFont.systemFont(ofSize: 14 * scale)
+        hangingWidth = (String(content[number]) as NSString).size(withAttributes: [.font: font])
+          .width
       } else if content == "---" || content == "***" {
         marker(3, .rule)
       } else if content.hasPrefix("- ") || content.hasPrefix("* ") || content.hasPrefix("+ ") {
@@ -680,12 +733,13 @@ struct Editor: NSViewRepresentable {
         hanging = true
       }
       styleInline(line, at: at, in: storage)
-      if !source && (offset > 0 || hanging) {
+      if !source && (offset > 0 || hanging || hangingWidth != nil) {
         // Wrapped item text lines up after its bullet/checkbox instead of under it.
         let indent = NSMutableParagraphStyle()
         indent.setParagraphStyle(paragraph)
         indent.firstLineHeadIndent = CGFloat(min(offset, 24)) * 8 * scale
-        indent.headIndent = indent.firstLineHeadIndent + NoteText.markerWidth * scale
+        indent.headIndent =
+          indent.firstLineHeadIndent + (hangingWidth ?? (hanging ? NoteText.markerWidth * scale : 0))
         storage.addAttribute(.paragraphStyle, value: indent, range: range)
       }
     }

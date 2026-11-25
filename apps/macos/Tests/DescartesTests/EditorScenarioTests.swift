@@ -114,8 +114,20 @@ import XCTest
     case "home": view.moveToLeftEndOfLine(nil)
     case "end": view.moveToRightEndOfLine(nil)
     case "cmd-return": view.toggleTask()
+    case "alt-up": view.moveLinesUp()
+    case "alt-down": view.moveLinesDown()
     default: XCTFail("unknown key \(name)", file: file, line: line)
     }
+  }
+  /// Pastes plain text the way ⌘V does, without touching the user's clipboard.
+  @discardableResult func paste(_ text: String) -> Self {
+    step = "paste \(text)"
+    view.breakUndoCoalescing()
+    event {
+      if !view.pasteLink(text) { view.insertText(text, replacementRange: view.selectedRange()) }
+    }
+    check()
+    return self
   }
   /// IME: composes each reading, then commits `commit` (e.g. "にほんご" → "日本語").
   @discardableResult func compose(_ readings: [String], commit: String) -> Self {
@@ -288,7 +300,9 @@ final class EditorScenarioTests: XCTestCase {
         s.select(range.location, range.length)
       }
       for token in scenario.tokens {
-        if token.hasPrefix("{") {
+        if token.hasPrefix("{paste:") {
+          s.paste(String(token.dropFirst(7).dropLast()))
+        } else if token.hasPrefix("{") {
           s.key(String(token.dropFirst().dropLast()))
         } else {
           s.type(token)
@@ -336,6 +350,64 @@ final class EditorScenarioTests: XCTestCase {
     s.type("`")
     s.expect("# T\n```\ncode\n```\nafter")
   }
+  @MainActor func testNewMarkdownElementsRenderLikeTheWeb() throws {
+    let s = Scenario("# T\n1. [ ] 一\n2. [x] 二\n> 引用\n~~消す~~ と _slanted_ と snake_case_name\n3. 番号")
+    let marks = s.view.decorations.map { "\($0.mark)" }
+    XCTAssertEqual(marks, ["task(false)", "task(true)", "quote"])
+    let storage = try XCTUnwrap(s.view.textStorage)
+    let raw = s.text as NSString
+    XCTAssertEqual(
+      storage.attribute(.strikethroughStyle, at: raw.range(of: "消す").location, effectiveRange: nil)
+        as? Int, NSUnderlineStyle.single.rawValue)
+    // Japanese falls back to Hiragino, which has no italic; Latin text shows the emphasis.
+    let italic = storage.attribute(
+      .font, at: raw.range(of: "slanted").location, effectiveRange: nil)
+    XCTAssertTrue(
+      (italic as? NSFont).map { NSFontManager.shared.traits(of: $0).contains(.italicFontMask) }
+        ?? false)
+    let snake = storage.attribute(.font, at: raw.range(of: "case").location, effectiveRange: nil)
+    XCTAssertFalse(
+      (snake as? NSFont).map { NSFontManager.shared.traits(of: $0).contains(.italicFontMask) }
+        ?? true, "underscores inside words are not emphasis")
+    // Clicking a numbered todo's checkbox toggles its box.
+    let box = try XCTUnwrap(s.view.box(at: s.view.decorations[0].at))
+    let hit = try XCTUnwrap(s.view.task(at: NSPoint(x: box.midX, y: box.midY)))
+    s.event { s.view.toggleBox(at: hit.at, checked: hit.checked) }
+    XCTAssertTrue(s.text.contains("1. [x] 一"))
+  }
+
+  @MainActor func testLinkDetectionAndMoveLineMenuKeys() throws {
+    let s = Scenario("# T\n[サイト](https://example.com/a) と https://x.org/p")
+    let raw = s.text as NSString
+    XCTAssertEqual(s.view.link(at: raw.range(of: "サイト").location)?.absoluteString,
+      "https://example.com/a")
+    XCTAssertEqual(s.view.link(at: raw.range(of: "x.org").location)?.absoluteString,
+      "https://x.org/p")
+    XCTAssertNil(s.view.link(at: raw.range(of: "と").location))
+    // ⌥↑ reaches the text view through the Note menu, as typed in the app.
+    let app = NSApplication.shared
+    let previous = app.mainMenu
+    defer { app.mainMenu = previous }
+    AppDelegate().buildMenus()
+    let lines = Scenario("# T\n一\n二")
+    lines.view.window?.makeFirstResponder(lines.view)
+    let up = String(Character(UnicodeScalar(NSUpArrowFunctionKey)!))
+    let event = try XCTUnwrap(
+      NSEvent.keyEvent(
+        with: .keyDown, location: .zero, modifierFlags: [.option, .function], timestamp: 0,
+        windowNumber: lines.view.window?.windowNumber ?? 0, context: nil, characters: up,
+        charactersIgnoringModifiers: up, isARepeat: false, keyCode: 126))
+    let item = try XCTUnwrap(
+      app.mainMenu?.items.compactMap(\.submenu).flatMap(\.items).first {
+        $0.action == #selector(NoteText.moveLinesUp)
+      })
+    XCTAssertEqual(item.keyEquivalent, up)
+    XCTAssertEqual(item.keyEquivalentModifierMask, [.option])
+    _ = event
+    lines.event { lines.view.moveLinesUp() }
+    lines.expect("# T\n二\n一")
+  }
+
   @MainActor func testFencesShowOnlyOnTheCaretLine() {
     let s = Scenario("# T\n```js\nconsole.log(1)\n```\n後")
     func shown(_ marker: String, after: Bool = false) -> Bool {

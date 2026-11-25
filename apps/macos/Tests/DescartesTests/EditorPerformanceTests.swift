@@ -38,6 +38,7 @@ final class EditorPerformanceTests: XCTestCase {
       switch value {
       case .task(let checked): return "task:\(checked)"
       case .bullet: return "bullet"
+      case .quote: return "quote"
       case .rule: return "rule"
       case .image: return "image"
       }

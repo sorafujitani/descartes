@@ -120,12 +120,24 @@ try {
       "ordinary editing and save work in the production bundle",
     );
     assert.equal(violations.length, 0, "the production UI has no CSP violations");
+    // Replacing the note through browser input and then blurring re-renders the decorations;
+    // a checkbox element must never be reused for a bullet (this happened before). Runs after
+    // the CSP check: Chrome's synthetic insertText briefly inserts a styled span itself.
+    await editor.click();
+    await editor.press("ControlOrMeta+a");
+    await page.keyboard.insertText("# 買い物メモ\n1. [ ] 牛乳\n- 箇条書き\n  - ネスト\n> 引用");
+    await editor.evaluate((element) => element.blur());
+    await page.waitForTimeout(100);
+    assert.equal(await page.locator(".cm-task-checkbox").count(), 1, "one checkbox for one task");
+    assert.equal(await page.locator(".cm-bullet").count(), 2, "bullets stay bullets after blur");
+    assert.equal(await page.locator(".cm-quote-bar").count(), 1, "the quote shows its bar");
     console.log(
       JSON.stringify({
         viewport: name,
         productionStyles: true,
         editing: true,
         checkboxSave: true,
+        widgetsAfterBlur: true,
         cspViolations: 0,
       }),
     );

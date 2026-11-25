@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
 import {
+  linkAt,
+  moveLines,
+  pasteLink,
+  wrapOnType,
   breakBeforeHeading,
   closeFence,
   continueList,
@@ -202,4 +206,49 @@ test("heading Return, marker Backspace and smart line start follow the Mac edito
   assert.equal(deleteMarker("```\n- a", 6), undefined, "inside code");
   assert.equal(markerEnd("  * [x] done"), 8);
   assert.equal(markerEnd("1. item"), undefined);
+});
+
+test("typing a delimiter over a selection wraps it; a URL pasted over text makes a link", () => {
+  const text = "# T\n日本語 text";
+  const span = { start: 4, end: 7 };
+  assert.deepEqual(wrapOnType(text, span, "*"), { text: "# T\n*日本語* text", start: 5, end: 8 });
+  assert.equal(wrapOnType(text, span, "~")?.text, "# T\n~~日本語~~ text");
+  assert.deepEqual(wrapOnType(text, span, "["), {
+    text: "# T\n[日本語]() text",
+    start: 10,
+    end: 10,
+  });
+  assert.equal(wrapOnType(text, { start: 4, end: 4 }, "*"), undefined, "no selection");
+  assert.equal(wrapOnType("a\nb", { start: 0, end: 3 }, "*"), undefined, "across lines");
+  assert.equal(wrapOnType("```\ncode", { start: 4, end: 8 }, "*"), undefined, "inside code");
+  assert.equal(wrapOnType(text, span, "x"), undefined);
+  assert.deepEqual(pasteLink(text, span, " https://example.com/a?b=1 "), {
+    text: "# T\n[日本語](https://example.com/a?b=1) text",
+    start: 36,
+    end: 36,
+  });
+  assert.equal(pasteLink(text, span, "not a url"), undefined);
+  assert.equal(pasteLink(text, { start: 4, end: 4 }, "https://e.com"), undefined);
+  assert.equal(pasteLink("https://a.com", { start: 0, end: 13 }, "https://e.com"), undefined);
+  assert.equal(linkAt("see [site](https://e.com) and https://x.org/p", 7), "https://e.com");
+  assert.equal(linkAt("see [site](https://e.com) and https://x.org/p", 35), "https://x.org/p");
+  assert.equal(linkAt("plain text", 3), undefined);
+});
+
+test("lines move up and down with the selection; ordered lists renumber on Return", () => {
+  assert.deepEqual(moveLines("a\nb\nc", { start: 3, end: 3 }, true), {
+    text: "b\na\nc",
+    start: 1,
+    end: 1,
+  });
+  assert.deepEqual(moveLines("a\nb\nc", { start: 0, end: 3 }, false), {
+    text: "c\na\nb",
+    start: 2,
+    end: 5,
+  });
+  assert.equal(moveLines("a\nb", { start: 0, end: 0 }, true), undefined);
+  assert.equal(moveLines("a\nb", { start: 2, end: 2 }, false), undefined);
+  const list = "1. a\n2. b\n   - nested\n3. c\n\n1. other";
+  assert.equal(continueList(list, 4)?.text, "1. a\n2. \n3. b\n   - nested\n4. c\n\n1. other");
+  assert.equal(continueList("1) a\n2. b", 4)?.text, "1) a\n2) \n2. b", "other delimiter");
 });

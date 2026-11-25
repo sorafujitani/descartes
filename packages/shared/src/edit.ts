@@ -12,7 +12,11 @@ export const shortcutHelp = [
   ["Tab / ⇧Tab", "リストの字下げ / 戻す（それ以外ではタブを入力）"],
   ["⌘Return", "ToDoにする（選択した複数行も） / チェックを切り替える"],
   ["[] / 「」", "行頭で入力するとToDo（- [ ] ）になる"],
-  ["⌘B / ⌘I / ⌘⇧`", "太字 / 斜体 / インラインコード"],
+  ["⌘B / ⌘I / ⌘⇧X / ⌘⇧`", "太字 / 斜体 / 取り消し線 / インラインコード"],
+  ["選択して * _ ` ~ [", "選択した文字を記号で囲む（[ はリンク）"],
+  ["URLを選択文字に貼り付け", "リンク [文字](URL) にする"],
+  ["⌥↑ / ⌥↓", "行を上 / 下へ移動"],
+  ["⌘クリック", "リンクを開く"],
   ["⌘L", "リンクを挿入"],
   ["⌘K", "ショートカット一覧"],
   ["⌘+ / ⌘− / ⌘0", "拡大 / 縮小 / 100%"],
@@ -143,11 +147,35 @@ export function continueList(text: string, caret: number) {
   // An empty nested item moves out one level first; at the top level it ends the list.
   if (item.length === line.length && item.indent) return indentItem(text, caret, true);
   if (item.length === line.length) return replace(text, start, start + item.length, "", start);
-  return replace(text, caret, caret, "\n" + item.next, caret + 1 + item.next.length);
+  const next = replace(text, caret, caret, "\n" + item.next, caret + 1 + item.next.length);
+  return { ...next, text: renumberAfter(next.text, next.start) };
+}
+const orderedItem = /^([ \t]*)(\d{1,9})([.)])(?=[ \t]|$)/;
+/**
+ * Renumbers the ordered items that follow the item at `at` in the same list (same indentation
+ * and delimiter; deeper lines are skipped), so inserting an item keeps 1, 2, 3… in order.
+ */
+export function renumberAfter(text: string, at: number) {
+  const lines = text.split("\n");
+  let index = text.slice(0, at).split("\n").length - 1;
+  const first = orderedItem.exec(lines[index]);
+  if (!first) return text;
+  let number = Number(first[2]);
+  for (index++; index < lines.length; index++) {
+    const line = lines[index];
+    const indent = /^[ \t]*/.exec(line)![0];
+    if (indent.length > first[1].length && line.trim()) continue;
+    const item = orderedItem.exec(line);
+    if (!item || item[1] !== first[1] || item[3] !== first[3]) break;
+    number++;
+    lines[index] = item[1] + number + line.slice(item[1].length + item[2].length);
+  }
+  return lines.join("\n");
 }
 /** A bullet ("- ") or task ("- [ ] ") marker, which both editors show as one dot/checkbox. */
-const styledMarker = /^([ \t]*)([-*+] \[[ xX]\] |[-*+] )/;
-/** Where the text of a bullet/task item starts, for ⌘← / Home ("smart home"). */
+/** Markers both editors replace with a dot, checkbox or quote bar (hidden, removed as one). */
+const styledMarker = /^([ \t]*)((?:[-*+]|\d{1,9}[.)]) \[[ xX]\] |[-*+] |> )/;
+/** Where the text of a bullet/task/quote line starts, for ⌘← / Home ("smart home"). */
 export function markerEnd(line: string) {
   const match = styledMarker.exec(line);
   return match ? match[0].length : undefined;
@@ -341,6 +369,75 @@ export function todoShortcut(text: string, caret: number) {
   const separated = text[caret] === " " || text[caret] === "\t";
   const insert = match[1] + (match[2] ?? "-") + (separated ? " [ ]" : " [ ] ");
   return { from: start, to: caret, insert, absorbSpace: !separated };
+}
+/**
+ * Typing *, _, `, ~ or [ while text on one line is selected wraps it instead of replacing it
+ * (~ makes ~~strikethrough~~, [ makes a link with the caret in its URL). Mirrors the Mac app.
+ */
+export function wrapOnType(text: string, span: Span, typed: string) {
+  const pairs: Record<string, [string, string]> = {
+    "*": ["*", "*"],
+    _: ["_", "_"],
+    "`": ["`", "`"],
+    "~": ["~~", "~~"],
+    "[": ["[", "]()"],
+  };
+  const pair = pairs[typed];
+  const selected = text.slice(span.start, span.end);
+  if (!pair || !selected || /[\r\n]/.test(selected)) return;
+  const { start, line } = lineAt(text, span.start);
+  if (fenced(text, start, line)) return;
+  const [open, close] = pair;
+  const result = text.slice(0, span.start) + open + selected + close + text.slice(span.end);
+  if (typed === "[") {
+    const caret = span.end + open.length + 2;
+    return { text: result, start: caret, end: caret };
+  }
+  return { text: result, start: span.start + open.length, end: span.end + open.length };
+}
+/** Pasting a URL while text on one line is selected makes it a link: [text](url). */
+export function pasteLink(text: string, span: Span, pasted: string) {
+  const url = pasted.trim();
+  const selected = text.slice(span.start, span.end);
+  if (!selected || /[\r\n]/.test(selected) || !/^https?:\/\/[^\s<>()]+$/.test(url)) return;
+  if (/^https?:\/\//.test(selected.trim())) return;
+  const { start, line } = lineAt(text, span.start);
+  if (fenced(text, start, line)) return;
+  const link = "[" + selected + "](" + url + ")";
+  const caret = span.start + link.length;
+  return {
+    text: text.slice(0, span.start) + link + text.slice(span.end),
+    start: caret,
+    end: caret,
+  };
+}
+/**
+ * Moves the lines covered by the selection up or down by one line (⌥↑ / ⌥↓), keeping the
+ * selection on the moved text. Mirrors the Mac app.
+ */
+export function moveLines(text: string, span: Span, up: boolean) {
+  const lines = text.split("\n");
+  const first = text.slice(0, span.start).split("\n").length - 1;
+  let endAt = span.end;
+  if (span.end > span.start && text[span.end - 1] === "\n") endAt--;
+  const last = text.slice(0, endAt).split("\n").length - 1;
+  if (up ? first === 0 : last === lines.length - 1) return;
+  const block = lines.slice(first, last + 1);
+  const other = up ? lines[first - 1] : lines[last + 1];
+  const shift = (other.length + 1) * (up ? -1 : 1);
+  const result = up
+    ? [...lines.slice(0, first - 1), ...block, other, ...lines.slice(last + 1)]
+    : [...lines.slice(0, first), other, ...block, ...lines.slice(last + 2)];
+  return { text: result.join("\n"), start: span.start + shift, end: span.end + shift };
+}
+/** The URL of a Markdown link or bare URL at `offset` in `line`, for ⌘-click. */
+export function linkAt(line: string, offset: number) {
+  for (const match of line.matchAll(
+    /\[[^\]\n]*\]\((https?:\/\/[^\s)]+)\)|https?:\/\/[^\s<>()]+/g,
+  )) {
+    if (offset >= match.index && offset <= match.index + match[0].length)
+      return match[1] ?? match[0];
+  }
 }
 export function wrapSelection(
   text: string,

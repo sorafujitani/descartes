@@ -67,29 +67,33 @@ With Xcode installed, run `pnpm build:macos`, copy `apps/macos/dist/Descartes.ap
 
 Type directly in the window. Start the first line with `# Title`. **⌘P** finds a document, **⌘N** starts a new one, and edits are autosaved (see [Autosave](#autosave)); **⌘S** commits immediately. Headings and fenced code are styled in place, not converted to HTML. The app remembers the last open document and window frame. A conflicting save retains the unsaved draft and stops autosave; copy it before reopening the latest version. Switching documents, quitting and switching to another app save first; the app asks before discarding only changes that could not be saved.
 
-The web app and the Mac app share the same Markdown editing commands. On the web, press **⌘K** or **ショートカット**. On the Mac, use **⌘K** or the **⌘** button. Completed tasks are muted and struck through in the note view and in preview. Fenced code is shown as a Document Design System code block; its fences (and the language after ` ``` `) are hidden except on the caret's line, where they are muted and editable; read-only preview always hides them. Return after an opening fence adds the closing fence and puts the caret inside, unless the fence opens an existing block below; a new block above other blocks never pairs with their fences. Typing the closing fence by hand steps over the added one. On both clients, **⌘Return** turns plain text, bullets and numbered items (or every selected line) into tasks (`- [ ] `) and otherwise toggles them, and typing `[]` (or `［］`, or the Japanese IME's `「」`) at the start of a line or bullet creates a task. Both show bullets as dots and tasks as outlined checkboxes in the same column; the command logic lives in `packages/shared/src/edit.ts` and is mirrored in the Mac app's `MarkdownCommands.swift`, with the same test tables on both sides. On the Mac, the checklist button does the same as ⌘Return, clicking a checkbox toggles it without moving the caret (also in preview), and bullets/checkboxes stay aligned with the text while typing, follow the zoom level, and wrapped item text lines up after them.
+The web app and the Mac app share the same Markdown editing commands. On the web, press **⌘K** or **ショートカット**. On the Mac, use **⌘K** or the **⌘** button. Completed tasks are muted and struck through in the note view and in preview. Fenced code is shown as a Document Design System code block; its fences (and the language after ` ``` `) are hidden except on the caret's line, where they are muted and editable; read-only preview always hides them. Return after an opening fence adds the closing fence and puts the caret inside, unless the fence opens an existing block below; a new block above other blocks never pairs with their fences. Typing the closing fence by hand steps over the added one. On both clients, **⌘Return** turns plain text, bullets and numbered items (or every selected line) into tasks (`- [ ] `) and otherwise toggles them, and typing `[]` (or `［］`, or the Japanese IME's `「」`) at the start of a line or bullet creates a task. Both show bullets as dots, tasks (including numbered `1. [ ]` tasks) as outlined checkboxes and quotes as a bar with quieter text, with wrapped item text lined up after the marker; Return in an ordered list renumbers the following items, and `~~strikethrough~~` and `_emphasis_` are styled; the command logic lives in `packages/shared/src/edit.ts` and is mirrored in the Mac app's `MarkdownCommands.swift`, with the same test tables on both sides. On the Mac, the checklist button does the same as ⌘Return, clicking a checkbox toggles it without moving the caret (also in preview), and bullets/checkboxes stay aligned with the text while typing, follow the zoom level, and wrapped item text lines up after them.
 
 **Keyboard editing** (also listed in the File, Edit and Note menus):
 
-| Keys                    | Action                                                                          |
-| ----------------------- | ------------------------------------------------------------------------------- |
-| ⌘⇧P / ⌘E                | Toggle read-only preview / return from preview to editing                       |
-| ⌘P, ↑↓, Return, Esc     | Search titles, select, open, dismiss                                            |
-| ⌘F, ⌘G / ⌘⇧G            | Find in the current note, next / previous match                                 |
-| ⌘⌥[ / ⌘⌥]               | Previous / next Markdown heading outside fenced code                            |
-| Return                  | Continue lists, quotes and tasks; an empty item outdents if nested, else exits  |
-| Return after ` ``` `    | Add the closing fence (if nothing closes the block) and type inside it          |
-| Return at heading text  | Insert an empty line above the heading instead of splitting `##` from its text  |
-| Tab / ⇧Tab              | Indent / outdent the current list item; elsewhere Tab inserts a tab             |
-| ⌘Return                 | Make the line (or every selected line) a task, or toggle its checkbox           |
-| `[]` at a line start    | Becomes a task (`- [ ] `); a space typed right after it is absorbed             |
-| ⌘← / ←                  | Stop after a bullet/checkbox first; hidden markers never need extra key presses |
-| ⌘B / ⌘I / ⌘⇧`           | Wrap the selection in bold, italic or inline code                               |
-| ⌘L                      | Insert a Markdown link and select its URL for typing                            |
-| ⌘E (editing)            | Inline code                                                                     |
-| ⌘K                      | Show actions and shortcuts; use ↑↓ and Return to execute                        |
-| ⌘+ (or ⌘=), ⌘−, ⌘0      | Increase, decrease or reset the note zoom (saved between launches)              |
-| ⌫ after a styled marker | Remove the entire bullet, checkbox or heading marker in one edit                |
+| Keys                                     | Action                                                                          |
+| ---------------------------------------- | ------------------------------------------------------------------------------- |
+| ⌘⇧P / ⌘E                                 | Toggle read-only preview / return from preview to editing                       |
+| ⌘P, ↑↓, Return, Esc                      | Search titles, select, open, dismiss                                            |
+| ⌘F, ⌘G / ⌘⇧G                             | Find in the current note, next / previous match                                 |
+| ⌘⌥[ / ⌘⌥]                                | Previous / next Markdown heading outside fenced code                            |
+| Return                                   | Continue lists, quotes and tasks; an empty item outdents if nested, else exits  |
+| Return after ` ``` `                     | Add the closing fence (if nothing closes the block) and type inside it          |
+| Return at heading text                   | Insert an empty line above the heading instead of splitting `##` from its text  |
+| Tab / ⇧Tab                               | Indent / outdent the current list item; elsewhere Tab inserts a tab             |
+| ⌘Return                                  | Make the line (or every selected line) a task, or toggle its checkbox           |
+| `[]` at a line start                     | Becomes a task (`- [ ] `); a space typed right after it is absorbed             |
+| ⌘← / ←                                   | Stop after a bullet/checkbox first; hidden markers never need extra key presses |
+| ⌘B / ⌘I / ⌘⇧X / ⌘⇧`                      | Wrap the selection in bold, italic, strikethrough or inline code                |
+| `*` `_` `` ` `` `~` `[` over a selection | Wrap it (`~` → `~~`, `[` → link with the caret in its URL)                      |
+| Paste a URL over text                    | Make it a link `[text](url)`                                                    |
+| ⌥↑ / ⌥↓                                  | Move the current or selected lines up / down                                    |
+| ⌘-click a link                           | Open it in the browser                                                          |
+| ⌘L                                       | Insert a Markdown link and select its URL for typing                            |
+| ⌘E (editing)                             | Inline code                                                                     |
+| ⌘K                                       | Show actions and shortcuts; use ↑↓ and Return to execute                        |
+| ⌘+ (or ⌘=), ⌘−, ⌘0                       | Increase, decrease or reset the note zoom (saved between launches)              |
+| ⌫ after a styled marker                  | Remove the entire bullet, checkbox or heading marker in one edit                |
 
 Standalone notebook image references (PNG, JPEG and WebP) display as images in styled editing and preview. Source mode shows their Markdown. External URLs are never requested by the native image loader.
 

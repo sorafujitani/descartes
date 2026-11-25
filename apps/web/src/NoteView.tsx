@@ -7,6 +7,10 @@ import {
   deleteMarker,
   imagePath,
   indentItem,
+  linkAt,
+  moveLines,
+  pasteLink,
+  wrapOnType,
   markerEnd,
   todoShortcut,
   toggleTask,
@@ -58,7 +62,9 @@ class TaskCheckbox extends WidgetType {
     );
   }
   updateDOM(dom: HTMLElement) {
-    const input = dom as HTMLInputElement;
+    // Only ever reuse a checkbox; reusing another widget's element showed checkboxes on bullets.
+    if (!(dom instanceof HTMLInputElement) || dom.type !== "checkbox") return false;
+    const input = dom;
     input.checked = this.checked;
     input.disabled = this.disabled;
     input.dataset.at = String(this.at);
@@ -89,8 +95,8 @@ class TaskCheckbox extends WidgetType {
 
 /** Ordinary "-", "*" and "+" items show a dot, as in the Mac app; the Markdown is unchanged. */
 class BulletMark extends WidgetType {
-  eq() {
-    return true;
+  eq(other: WidgetType) {
+    return other instanceof BulletMark;
   }
   toDOM() {
     const dot = document.createElement("span");
@@ -100,6 +106,18 @@ class BulletMark extends WidgetType {
   }
 }
 const bullet = Decoration.replace({ atomic: true, widget: new BulletMark() });
+class QuoteBar extends WidgetType {
+  eq(other: WidgetType) {
+    return other instanceof QuoteBar;
+  }
+  toDOM() {
+    const bar = document.createElement("span");
+    bar.className = "cm-quote-bar";
+    bar.setAttribute("aria-hidden", "true");
+    return bar;
+  }
+}
+const quoteBar = Decoration.replace({ atomic: true, widget: new QuoteBar() });
 /**
  * Applies a shared edit command (packages/shared/src/edit.ts, mirrored by the Mac app) at the
  * caret. Return, Backspace and ⌘Return use the same rules as the Mac editor instead of
@@ -122,6 +140,28 @@ function sharedCommand(
     });
     return true;
   };
+}
+function applyEdit(
+  view: EditorView,
+  previous: string,
+  next: Span & { text: string },
+  userEvent: string,
+) {
+  view.dispatch({
+    changes: minimalChange(previous, next.text),
+    selection: { anchor: next.start, head: next.end },
+    userEvent,
+    scrollIntoView: true,
+  });
+}
+/** ⌥↑ / ⌥↓ with the same rules as the Mac app. */
+function moveSelectedLines(view: EditorView, up: boolean) {
+  if (view.state.readOnly) return true;
+  const previous = view.state.doc.toString();
+  const { from, to } = view.state.selection.main;
+  const moved = moveLines(previous, { start: from, end: to }, up);
+  if (moved) applyEdit(view, previous, moved, "move.line");
+  return true;
 }
 /** ⌘← / Home first stops after a bullet or checkbox, then reaches the line start (as on the Mac). */
 function smartLineStart(view: EditorView) {
@@ -179,6 +219,28 @@ function taskDecorations(view: EditorView): DecorationSet {
       to: visible.to,
       enter(node) {
         if (node.name === "ListMark") {
+          // Wrapped item text lines up after its dot, checkbox or number (as in the Mac app).
+          const line = view.state.doc.lineAt(node.from);
+          const indent = Math.min(12, node.from - line.from);
+          const mark = view.state.doc.sliceString(node.from, node.to);
+          const task = /^[ \t]+\[[ xX]\]/.test(view.state.doc.sliceString(node.to, node.to + 5));
+          const kind = task || /^[-*+]$/.test(mark) ? "b" : mark.length > 2 ? "o2" : "o1";
+          ranges.push(Decoration.line({ class: `cm-hang-${kind}-${indent}` }).range(line.from));
+        }
+        if (node.name === "QuoteMark") {
+          // The first "> " on a line becomes a quote bar (the Mac app hides it the same way).
+          const line = view.state.doc.lineAt(node.from);
+          const prefix = view.state.doc.sliceString(line.from, node.from);
+          const space = view.state.doc.sliceString(node.to, node.to + 1) === " " ? 1 : 0;
+          if (/^[ \t]*$/.test(prefix) && (space || node.to === line.to)) {
+            ranges.push(
+              Decoration.line({
+                class: `cm-quote cm-hang-b-${Math.min(12, node.from - line.from)}`,
+              }).range(line.from),
+            );
+            ranges.push(quoteBar.range(node.from, node.to + space));
+          }
+        } else if (node.name === "ListMark") {
           const mark = view.state.doc.sliceString(node.from, node.to);
           const after = view.state.doc.sliceString(node.to, node.to + 5);
           // Task items are drawn by their checkbox; ordered items keep their numbers.
@@ -293,7 +355,23 @@ const proseHighlight = HighlightStyle.define([
   },
   { tag: tags.meta, color: "var(--color-text-muted)" },
 ]);
+/** Hanging indents per indentation (CSP forbids inline styles, so these are classes). */
+const hangingIndents: Record<string, { paddingLeft: string; textIndent: string }> = {};
+for (const [kind, width] of [
+  ["b", "1.45rem"],
+  ["o1", "1.3em"],
+  ["o2", "1.85em"],
+] as const)
+  for (let indent = 0; indent <= 12; indent++) {
+    const hang = `calc(${indent} * 0.28em + ${width})`;
+    // ".cm-line." outranks the theme's own ".cm-line" padding.
+    hangingIndents[`.cm-line.cm-hang-${kind}-${indent}`] = {
+      paddingLeft: hang,
+      textIndent: `calc(-1 * ${hang})`,
+    };
+  }
 const noteTheme = EditorView.theme({
+  ...hangingIndents,
   "&": { backgroundColor: "transparent", color: "var(--color-text)", fontSize: "1rem" },
   "&.cm-focused": { outline: "none" },
   ".cm-scroller": { fontFamily: "inherit", lineHeight: "1.6", overflow: "visible" },
@@ -361,6 +439,16 @@ const noteTheme = EditorView.theme({
   ".cm-code-last": { borderBottomLeftRadius: "8px", borderBottomRightRadius: "8px" },
   ".cm-code-fence": { color: "var(--color-text-muted)", fontSize: "0.85em" },
   ".cm-fence-hidden": { fontSize: "0", lineHeight: "0.75rem", padding: "0 1rem" },
+  ".cm-quote": { color: "var(--color-text-muted)" },
+  ".cm-quote-bar": {
+    display: "inline-block",
+    width: "3px",
+    height: "1.2em",
+    margin: "0 calc(1.35rem - 3px) -0.2em 0.1rem",
+    borderRadius: "2px",
+    backgroundColor: "var(--color-border, #2d333b)",
+    verticalAlign: "baseline",
+  },
   ".cm-completed-task": { color: "var(--color-text-muted)", textDecoration: "line-through" },
   ".cm-note-image": { maxWidth: "min(100%, 320px)", maxHeight: "240px", verticalAlign: "middle" },
 });
@@ -450,6 +538,8 @@ export const NoteView = forwardRef<
                 sharedCommand((text, caret) => indentItem(text, caret, true))(view) ||
                 indentLess(view),
             },
+            { key: "Alt-ArrowUp", run: (view) => moveSelectedLines(view, true) },
+            { key: "Alt-ArrowDown", run: (view) => moveSelectedLines(view, false) },
             { key: "Home", run: smartLineStart },
             { mac: "Cmd-ArrowLeft", run: smartLineStart },
             {
@@ -474,7 +564,13 @@ export const NoteView = forwardRef<
               },
             },
           ]),
-          markdown({ base: markdownLanguage, addKeymap: false, completeHTMLTags: false }),
+          markdown({
+            base: markdownLanguage,
+            addKeymap: false,
+            completeHTMLTags: false,
+            // Our pasteLink (shared with the Mac app) puts the caret after the link instead.
+            pasteURLAsLink: false,
+          }),
           keymap.of([...historyKeymap, ...defaultKeymap]),
           syntaxHighlighting(proseHighlight),
           liveMarkdown,
@@ -488,6 +584,17 @@ export const NoteView = forwardRef<
           EditorView.inputHandler.of((view, from, to, insert) => {
             const absorb = absorbSpaceAt;
             absorbSpaceAt = null;
+            if (from !== to && !view.state.readOnly && !view.composing) {
+              const wrapped = wrapOnType(
+                view.state.doc.toString(),
+                { start: from, end: to },
+                insert,
+              );
+              if (wrapped) {
+                applyEdit(view, view.state.doc.toString(), wrapped, "input.type");
+                return true;
+              }
+            }
             if (insert === " " && from === to && from === absorb) return true;
             if (!/[\]］」]$/.test(insert) || view.state.readOnly) return false;
             const doc = view.state.doc.toString();
@@ -502,6 +609,44 @@ export const NoteView = forwardRef<
             });
             if (todo.absorbSpace) absorbSpaceAt = todo.from + todo.insert.length;
             return true;
+          }),
+          // A URL pasted over selected text becomes [text](url). Done on CodeMirror's own paste
+          // transaction so its selection handling stays intact.
+          EditorState.transactionFilter.of((tr) => {
+            if (!tr.isUserEvent("input.paste") || !tr.docChanged) return tr;
+            const range = tr.startState.selection.main;
+            if (range.empty || tr.startState.selection.ranges.length > 1) return tr;
+            let pasted: string | undefined;
+            let replacesSelection = true;
+            tr.changes.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
+              if (pasted !== undefined || fromA !== range.from || toA !== range.to)
+                replacesSelection = false;
+              pasted = inserted.toString();
+            });
+            if (!replacesSelection || pasted === undefined) return tr;
+            const previous = tr.startState.doc.toString();
+            const link = pasteLink(previous, { start: range.from, end: range.to }, pasted);
+            if (!link) return tr;
+            return {
+              changes: minimalChange(previous, link.text),
+              selection: { anchor: link.start },
+              userEvent: "input.paste",
+              scrollIntoView: true,
+            };
+          }),
+          EditorView.domEventHandlers({
+            mousedown(event, view) {
+              // ⌘-click (Ctrl-click elsewhere) opens a link, as in the Mac app.
+              if (!(event.metaKey || event.ctrlKey) || event.button !== 0) return false;
+              const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+              if (pos == null) return false;
+              const line = view.state.doc.lineAt(pos);
+              const url = linkAt(line.text, pos - line.from);
+              if (!url) return false;
+              event.preventDefault();
+              window.open(url, "_blank", "noopener,noreferrer");
+              return true;
+            },
           }),
           EditorView.contentAttributes.of({
             "aria-label": "Markdown本文",

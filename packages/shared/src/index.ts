@@ -18,7 +18,11 @@ export {
   headingCaret,
   indentItem,
   insertLink,
+  linkAt,
   markerEnd,
+  moveLines,
+  pasteLink,
+  renumberAfter,
   shortcutHelp,
   insertTaskAfter,
   removeTask,
@@ -27,6 +31,7 @@ export {
   toggleTask,
   todoShortcut,
   toggleTaskAt,
+  wrapOnType,
   wrapSelection,
 } from "./edit.ts";
 export type { Span } from "./edit.ts";
