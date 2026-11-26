@@ -1,9 +1,9 @@
 // Exercise the built application with its real response headers. All requests are local mocks;
 // this never uses deployment credentials, GitHub, or notebook documents.
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { extname, resolve, sep } from "node:path";
+import { extname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 const { chromium } = createRequire(new URL("../apps/web/package.json", import.meta.url))(
   "playwright",
@@ -12,13 +12,55 @@ const root = fileURLToPath(
   new URL("../apps/web/.cloudflare/output/v1/workers/default/assets/", import.meta.url),
 );
 const headerFile = await readFile(new URL("../apps/web/public/_headers", import.meta.url), "utf8");
-const policy = headerFile
-  .split("\n")
-  .find((line) => line.trim().startsWith("Content-Security-Policy:"))
-  ?.trim()
-  .slice("Content-Security-Policy:".length)
-  .trim();
+// Workers Static Assets apply every matching _headers block, so a path inherits all of them.
+const headerRules = [];
+for (const line of headerFile.split("\n")) {
+  if (!line.trim() || line.trim().startsWith("#")) continue;
+  if (!/^\s/.test(line)) headerRules.push({ pattern: line.trim(), headers: {} });
+  else {
+    const [name, ...value] = line.trim().split(":");
+    headerRules.at(-1).headers[name.toLowerCase()] = value.join(":").trim();
+  }
+}
+assert.ok(
+  headerRules.every(({ pattern }) => !pattern.slice(0, -1).includes("*") && !pattern.includes(":")),
+  "this check only models exact paths and trailing splats",
+);
+const headersFor = (path) =>
+  Object.assign(
+    {},
+    ...headerRules
+      .filter(({ pattern }) =>
+        pattern.endsWith("*") ? path.startsWith(pattern.slice(0, -1)) : path === pattern,
+      )
+      .map(({ headers }) => headers),
+  );
+const policy = headersFor("/")["content-security-policy"];
 assert.ok(policy, "production CSP is present");
+
+// Only content-hashed build output may be cached without revalidation.
+const immutable = "public, max-age=31536000, immutable";
+const built = await readdir(root, { recursive: true, withFileTypes: true });
+const files = built
+  .filter((entry) => entry.isFile())
+  .map((entry) => "/" + relative(root, resolve(entry.parentPath, entry.name)).split(sep).join("/"));
+const hashed = files.filter((file) => /-[\w-]{8}\.\w+$/.test(file));
+assert.ok(hashed.length >= 2, "the build emits hashed script and stylesheet files");
+const indexHtml = await readFile(resolve(root, "index.html"), "utf8");
+for (const [, ref] of indexHtml.matchAll(/(?:src|href)="(\/assets\/[^"]+)"/g))
+  assert.ok(hashed.includes(ref), `index.html references hashed output ${ref}`);
+for (const file of files) {
+  if (file === "/_headers") continue;
+  const headers = headersFor(file);
+  assert.equal(headers["content-security-policy"], policy, `${file} keeps the CSP`);
+  assert.equal(headers["x-content-type-options"], "nosniff", `${file} keeps nosniff`);
+  if (file.startsWith("/assets/")) {
+    assert.ok(hashed.includes(file), `${file} under /assets/ is content-hashed`);
+    assert.equal(headers["cache-control"], immutable, `${file} is cached long-term`);
+  } else assert.equal(headers["cache-control"], undefined, `${file} is revalidated`);
+}
+for (const path of ["/", "/api/assets/image.png", "/api/docs"])
+  assert.equal(headersFor(path)["cache-control"], undefined, `${path} is not cached long-term`);
 assert.ok(
   !/script-src[^;]*'unsafe-inline'/.test(policy),
   "inline JavaScript must remain forbidden",
@@ -78,7 +120,7 @@ try {
         await route.fulfill({
           body: await readFile(file),
           contentType: mime[extname(file)] ?? "application/octet-stream",
-          headers: { "Content-Security-Policy": policy, "X-Content-Type-Options": "nosniff" },
+          headers: headersFor(url.pathname),
         });
       } catch {
         await route.fulfill({ status: 404 });
