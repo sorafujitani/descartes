@@ -291,6 +291,28 @@ export const LivePreviewLayout: StoryObj<typeof meta> = {
       ["六", "七"],
     ])
       await expect(textX(child) - textX(parent)).toBeGreaterThan(20);
+    // On an empty todo or bullet the caret stands where the text starts, not against the mark.
+    const empty = "# T\n- [ ] 文\n- [ ] \n- 文\n- ";
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: empty } });
+    view.focus();
+    for (const [filled, blank] of [
+      [2, 3],
+      [4, 5],
+    ]) {
+      const text = view.coordsAtPos(view.state.doc.line(filled).to - 1, 1)!.left;
+      const caret = view.coordsAtPos(view.state.doc.line(blank).to, -1)!.left;
+      await expect(Math.abs(caret - text)).toBeLessThan(1.5);
+    }
+    // The checkbox stays at the line's start (inside the editor), clear of the caret.
+    const area = view.contentDOM.getBoundingClientRect();
+    for (const box of dom.querySelectorAll(".cm-task-checkbox")) {
+      const rect = box.getBoundingClientRect();
+      await expect(rect.left).toBeGreaterThanOrEqual(area.left);
+      await expect(
+        view.coordsAtPos(view.state.doc.line(3).to, -1)!.left - rect.right,
+      ).toBeGreaterThan(5);
+    }
+    view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: nested } });
     // The selection is translucent so selected text stays readable (CodeMirror's opaque
     // light-theme lavender used to win in the focused editor).
     view.focus();

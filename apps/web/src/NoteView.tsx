@@ -94,19 +94,24 @@ class TaskCheckbox extends WidgetType {
   }
   updateDOM(dom: HTMLElement) {
     // Only ever reuse a checkbox; reusing another widget's element showed checkboxes on bullets.
-    if (!(dom instanceof HTMLInputElement) || dom.type !== "checkbox") return false;
-    const input = dom;
+    const input = dom.classList.contains("cm-task-box") ? dom.firstElementChild : null;
+    if (!(input instanceof HTMLInputElement) || input.type !== "checkbox") return false;
     input.checked = this.checked;
     input.disabled = this.disabled;
     input.dataset.at = String(this.at);
     return true;
   }
   toDOM(view: EditorView) {
+    // The box includes the gap before the text, so a caret on an empty todo stands where the
+    // text will start (a margin on the input was not counted for the caret).
+    const box = document.createElement("span");
+    box.className = "cm-task-box";
     const input = document.createElement("input");
     input.type = "checkbox";
     input.className = "cm-task-checkbox";
     input.setAttribute("aria-label", "チェックを切り替える");
-    this.updateDOM(input);
+    box.append(input);
+    this.updateDOM(box);
     input.addEventListener("change", () => {
       if (view.state.readOnly) return;
       const at = Number(input.dataset.at);
@@ -117,7 +122,7 @@ class TaskCheckbox extends WidgetType {
         userEvent: "input.task",
       });
     });
-    return input;
+    return box;
   }
   ignoreEvent() {
     return true;
@@ -585,6 +590,14 @@ const noteTheme = EditorView.theme(
     },
     // Checkboxes and bullets match the Mac app: a muted outlined box, a dot centred in the same
     // space, and item text starting at the same position for both.
+    // Marker boxes are 1.45rem wide (the hanging indent): 0.1rem + 0.9rem mark + 0.45rem gap.
+    // text-indent is reset: the line's negative hanging indent would otherwise move the box.
+    ".cm-task-box": {
+      display: "inline-block",
+      width: "1.45rem",
+      textIndent: "0",
+      whiteSpace: "nowrap",
+    },
     ".cm-task-checkbox": {
       appearance: "none",
       position: "relative",
@@ -592,7 +605,7 @@ const noteTheme = EditorView.theme(
       width: "0.9rem",
       height: "0.9rem",
       padding: "0",
-      margin: "0 0.45rem 0.15em 0.1rem",
+      margin: "0 0 0.15em 0.1rem",
       border: "1.5px solid var(--color-text-muted)",
       borderRadius: "0.22rem",
       backgroundColor: "transparent",
@@ -617,15 +630,15 @@ const noteTheme = EditorView.theme(
     ".cm-bullet": {
       position: "relative",
       display: "inline-block",
-      width: "0.9rem",
+      width: "1.45rem",
       height: "0.9rem",
-      margin: "0 0.45rem 0.15em 0.1rem",
+      margin: "0 0 0.15em 0",
       verticalAlign: "middle",
     },
     ".cm-bullet::before": {
       content: '""',
       position: "absolute",
-      left: "calc(50% - 0.15rem)",
+      left: "0.4rem",
       top: "calc(50% - 0.15rem)",
       width: "0.3rem",
       height: "0.3rem",
