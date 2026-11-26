@@ -5,7 +5,7 @@ import { generateKeyPairSync, sign } from "node:crypto";
 import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import worker from "../apps/api/src/index.ts";
-import { route } from "./support.ts";
+import { answerGraphql, route } from "./support.ts";
 import { github, type Env } from "../apps/api/src/github.ts";
 import { memoryStore } from "../apps/api/dev/demo.ts";
 import { fail } from "../apps/api/src/repository.ts";
@@ -88,8 +88,10 @@ test("GitHub adapter writes UTF-8 to the specified branch and forwards the read 
     if (path.endsWith("/repo")) return Response.json({ private: true });
     if (path.includes("/git/trees/"))
       return Response.json({ tree: [{ path: id + ".md", sha, type: "blob" }] });
-    if (path.endsWith("/git/blobs/" + sha))
-      return Response.json({ content: Buffer.from(markdown).toString("base64") });
+    if (path === "/graphql") {
+      assert.equal(init?.method, "POST");
+      return answerGraphql(init, (oid) => (oid === sha ? markdown : null));
+    }
     assert.ok(path.endsWith("/contents/docs/" + id + ".md"));
     if (init?.method === "PUT") {
       const body = JSON.parse(String(init.body));
