@@ -24,7 +24,7 @@ function fixture(db: SqliteD1, count = 65) {
       { sha: shaOf(n + 1), markdown: `# Note ${n}\nbody needle 検索 ${n}` },
     ]),
   );
-  const counts = { metadata: 0, tree: 0, blobs: 0, writes: 0 };
+  const counts = { metadata: 0, tree: 0, blobs: 0, writes: 0, contents: 0 };
   const send: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
     if (url.pathname.endsWith("index-fixture")) {
@@ -57,6 +57,7 @@ function fixture(db: SqliteD1, count = 65) {
       docs.set(id, doc);
       return Response.json({ content: { sha: doc.sha } });
     }
+    counts.contents++;
     const doc = docs.get(id)!;
     return Response.json({
       sha: doc.sha,
@@ -121,6 +122,23 @@ test("persistent index survives adapter restarts and completes fully indexed sea
           },
         }),
       );
+  } finally {
+    db.close();
+  }
+});
+
+test("a restarted adapter opens a document from D1 without blob or Contents API reads", async () => {
+  const db = new SqliteD1();
+  try {
+    const f = fixture(db, 2);
+    const first = await f.fresh().get(idOf(1));
+    assert.equal(f.counts.blobs, 1);
+    const roundTrips = db.roundTrips;
+    assert.deepEqual(await f.fresh().get(idOf(1)), first);
+    assert.equal(f.counts.blobs, 1);
+    assert.equal(f.counts.contents, 0);
+    assert.equal(f.counts.tree, 2);
+    assert.equal(db.roundTrips - roundTrips, 2); // Prune on the new adapter's first tree, then the body read.
   } finally {
     db.close();
   }

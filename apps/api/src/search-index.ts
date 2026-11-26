@@ -50,6 +50,14 @@ export class SearchIndex {
       .all<{ sha: string; title: string }>();
     return new Map(results.map(({ sha, title }) => [sha, title]));
   }
+  /** Immutable body of one blob, so a cold isolate can open a document without GitHub reads. */
+  async markdown(sha: string): Promise<string | undefined> {
+    const { results } = await this.db
+      .prepare(`SELECT markdown FROM search_blobs WHERE scope = ? AND sha = ?`)
+      .bind(await this.scope, sha)
+      .all<{ markdown: string }>();
+    return results[0]?.markdown;
+  }
   private async containsStatement(entries: IndexEntry[]) {
     return this.db
       .prepare(`SELECT count(*) AS count FROM json_each(?) e
