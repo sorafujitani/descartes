@@ -26,6 +26,21 @@ const TREE_TTL = 15_000;
 const PRIVACY_TTL = 60_000;
 const PRUNE_INTERVAL = 10 * 60_000;
 const CONTENT_BUDGET = 8 * 1024 * 1024;
+// Cron runs have no Access JWKS read: privacy + tree + blobs stay under Workers Free's 50 subrequests.
+const WARM_BLOBS = 40;
+// Commit each chunk so a run cut short by limits still keeps its progress for the next run.
+const WARM_CHUNK = 8;
+export type WarmReport = {
+  documents: number;
+  indexed: number;
+  failed: number;
+  oversized: number;
+  remaining: number;
+};
+export type GitHubRepository = Repository & {
+  /** Background index maintenance for the cron handler; deliberately not part of the HTTP API. */
+  warm(blobBudget?: number): Promise<WarmReport>;
+};
 
 async function mapConcurrent<T, R>(items: T[], fn: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = [];
@@ -48,7 +63,7 @@ async function mapConcurrent<T, R>(items: T[], fn: (item: T) => Promise<R>): Pro
 }
 
 /** One adapter per repository/credential/branch, retained by the Worker (never a public HTTP cache). */
-export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Repository {
+export function github(env: Env, send: typeof fetch = fetch, now = Date.now): GitHubRepository {
   const root = "https://api.github.com/repos/" + env.GITHUB_REPOSITORY;
   const ref = encodeURIComponent(env.GITHUB_BRANCH || "main");
   // Only the docs subtree is listed, so screenshots in assets/ can never make the tree truncate.
@@ -247,26 +262,71 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Re
     writes = result.catch(() => {});
     return result;
   }
+  async function privateOnly({ fresh = false } = {}) {
+    // A short success-only window removes a GitHub round trip from most reads; writes never use it.
+    if (!fresh && now() < privateUntil) return;
+    if (!checkingPrivate)
+      checkingPrivate = (async () => {
+        try {
+          if ((await (await call("")).json()).private !== true)
+            fail(403, "A private document repository is required.");
+          privateUntil = now() + PRIVACY_TTL;
+        } catch (error) {
+          privateUntil = -Infinity;
+          throw error;
+        }
+      })();
+    try {
+      await checkingPrivate;
+    } finally {
+      checkingPrivate = undefined;
+    }
+  }
   return {
-    async privateOnly({ fresh = false } = {}) {
-      // A short success-only window removes a GitHub round trip from most reads; writes never use it.
-      if (!fresh && now() < privateUntil) return;
-      if (!checkingPrivate)
-        checkingPrivate = (async () => {
-          try {
-            if ((await (await call("")).json()).private !== true)
-              fail(403, "A private document repository is required.");
-            privateUntil = now() + PRIVACY_TTL;
-          } catch (error) {
-            privateUntil = -Infinity;
-            throw error;
-          }
-        })();
-      try {
-        await checkingPrivate;
-      } finally {
-        checkingPrivate = undefined;
+    privateOnly,
+    async warm(blobBudget = WARM_BLOBS) {
+      const report: WarmReport = {
+        documents: 0,
+        indexed: 0,
+        failed: 0,
+        oversized: 0,
+        remaining: 0,
+      };
+      if (!index) return report;
+      await privateOnly();
+      const prunedBefore = prunedAt;
+      const entries = await snapshot();
+      report.documents = entries.length;
+      // The tree read may already have pruned; otherwise prune here so every run bounds the table.
+      if (prunedAt === prunedBefore) {
+        prunedAt = now();
+        await indexed((database) => database.prune(entries));
       }
+      const known = await indexed((database) => database.titles(entries.map((e) => e.sha)));
+      if (!known) return { ...report, remaining: entries.length };
+      for (const [sha, title] of known) rememberTitle(sha, title);
+      const missing = [...new Set(entries.map((e) => e.sha).filter((sha) => !known.has(sha)))];
+      const batch = missing.slice(0, Math.max(0, blobBudget));
+      report.remaining = missing.length - batch.length;
+      for (let i = 0; i < batch.length; i += WARM_CHUNK) {
+        const loaded = await mapConcurrent(batch.slice(i, i + WARM_CHUNK), async (sha) => {
+          try {
+            return { sha, markdown: await blob(sha) };
+          } catch {
+            return undefined;
+          }
+        });
+        const blobs = loaded.filter((item) => item !== undefined);
+        const oversized = await indexed((database) => database.put(blobs));
+        if (oversized === undefined) {
+          report.remaining += batch.length - i;
+          break;
+        }
+        report.indexed += blobs.length - oversized;
+        report.oversized += oversized;
+        report.failed += loaded.length - blobs.length;
+      }
+      return report;
     },
     async list(cursor) {
       const docs = await snapshot();

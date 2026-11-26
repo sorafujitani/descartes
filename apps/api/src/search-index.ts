@@ -181,8 +181,10 @@ export class SearchIndex {
         .bind(scope, ...source.guardParams, ...source.params),
     ]);
   }
+  /** Stores `blobs`, skipping documents too large for one row; returns how many were skipped. */
   async put(blobs: IndexBlob[]) {
     const scope = await this.scope;
+    let oversized = 0;
     const sql = `INSERT INTO search_blobs(scope, sha, title, normalized_title, markdown, search_text)
       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(scope, sha) DO NOTHING`;
     let batch: SearchStatement[] = [];
@@ -195,8 +197,12 @@ export class SearchIndex {
         new TextEncoder().encode(text).length +
         title.length * 4 +
         256;
-      // Bound batch payloads; pathological normalization expansion falls back to the canonical reader.
-      if (size > 2 * 1024 * 1024) throw new Error("Document exceeds index row budget.");
+      // Bound batch payloads. An oversized document stays unindexed instead of failing the batch,
+      // which would otherwise block every other document in it on each retry.
+      if (size > 2 * 1024 * 1024) {
+        oversized++;
+        continue;
+      }
       if (bytes + size > 2 * 1024 * 1024 && batch.length) {
         await this.db.batch(batch);
         batch = [];
@@ -208,6 +214,9 @@ export class SearchIndex {
       bytes += size;
     }
     if (batch.length) await this.db.batch(batch);
+    // A count only: never titles, paths or bodies.
+    if (oversized) console.warn(JSON.stringify({ event: "search_index_oversized", oversized }));
+    return oversized;
   }
   private searchStatement(source: Source, scope: string, terms: string[]) {
     const titleMatches = `NOT EXISTS (SELECT 1 FROM json_each(?) t WHERE instr(${heading}, t.value) = 0)`;
