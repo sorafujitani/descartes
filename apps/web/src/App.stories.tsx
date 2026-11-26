@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, waitFor, within } from "storybook/test";
+import { expect, spyOn, waitFor, within } from "storybook/test";
 import { App } from "./App";
 import { createMockApi, documentFixtures } from "../.storybook/fixtures";
 import { expectReadableEditor } from "../.storybook/geometry";
@@ -171,6 +171,45 @@ export const SwitchNotes: Story = {
     await waitFor(() =>
       expect(within(palette).getByRole("button", { name: /仕事の記録/ })).toBeVisible(),
     );
+  },
+};
+
+export const SearchWithKeyboard: Story = {
+  play: async ({ canvasElement, userEvent }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(await canvas.findByRole("button", { name: "ノート一覧" }));
+    const palette = await canvas.findByRole("dialog", { name: "ノート一覧" });
+    const contents = within(palette);
+    const search = contents.getByRole("searchbox", { name: "ノートを検索" });
+    await waitFor(() => expect(search).toHaveFocus());
+    await contents.findByRole("button", { name: "読書ノート" });
+
+    // Headless browsers have no system keyboard; emulate its change to the visual viewport.
+    const viewport = window.visualViewport!;
+    const visibleHeight = 300;
+    const viewportTop = 24;
+    const height = spyOn(viewport, "height", "get").mockReturnValue(visibleHeight);
+    const top = spyOn(viewport, "offsetTop", "get").mockReturnValue(viewportTop);
+    try {
+      viewport.dispatchEvent(new Event("resize"));
+      const bounds = palette.getBoundingClientRect();
+      await expect(bounds.top).toBeGreaterThanOrEqual(viewportTop);
+      await expect(bounds.bottom).toBeLessThanOrEqual(viewportTop + visibleHeight);
+
+      await userEvent.keyboard("読書");
+      await waitFor(() => expect(contents.getAllByRole("button")).toHaveLength(2));
+      const result = contents.getByRole("button", { name: "読書ノート" });
+      const list = contents.getByRole("list", { name: "ノート" }).getBoundingClientRect();
+      const row = result.getBoundingClientRect();
+      await expect(row.top).toBeGreaterThanOrEqual(list.top);
+      await expect(row.bottom).toBeLessThanOrEqual(list.bottom);
+      await userEvent.click(result);
+      await expect(palette).not.toBeVisible();
+    } finally {
+      top.mockRestore();
+      height.mockRestore();
+      viewport.dispatchEvent(new Event("resize"));
+    }
   },
 };
 

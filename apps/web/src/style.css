@@ -157,7 +157,9 @@ dialog kbd,
 .palette {
   width: min(38rem, calc(100vw - 1rem));
   max-width: none;
-  max-height: min(34rem, calc(100vh - 6rem));
+  top: var(--palette-viewport-top, 0px);
+  bottom: auto;
+  max-height: min(34rem, calc(var(--palette-viewport-height, 100vh) - 6rem));
   margin: 4.5rem auto auto;
   padding: 0;
   overflow: hidden;
@@ -193,7 +195,7 @@ dialog kbd,
   padding: 0;
 }
 .palette-list {
-  flex: 1;
+  flex: auto;
   margin: 0;
   overflow: auto;
   padding: 0.35rem;
@@ -258,7 +260,7 @@ dialog kbd,
   }
   .palette {
     margin-top: 0.5rem;
-    max-height: calc(100vh - 1rem);
+    max-height: calc(var(--palette-viewport-height, 100vh) - 1rem);
   }
   .palette-footer small {
     display: none;

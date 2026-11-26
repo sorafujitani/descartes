@@ -78,13 +78,31 @@ export const NotePalette = memo(function NotePalette({
   useLayoutEffect(() => {
     const element = dialog.current;
     if (!element) return;
-    if (open && !element.open) {
+    if (!open) {
+      if (element.open) element.close();
+      return;
+    }
+    if (!element.open) {
       setQuery("");
       setActive(0);
       setRecent(recentNotes());
       element.showModal?.();
       requestAnimationFrame(() => field.current?.focus());
-    } else if (!open && element.open) element.close();
+    }
+    // The mobile keyboard shrinks the visible viewport without changing 100vh.
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+    const updateViewport = () => {
+      element.style.setProperty("--palette-viewport-height", `${viewport.height}px`);
+      element.style.setProperty("--palette-viewport-top", `${viewport.offsetTop}px`);
+    };
+    updateViewport();
+    viewport.addEventListener("resize", updateViewport);
+    viewport.addEventListener("scroll", updateViewport);
+    return () => {
+      viewport.removeEventListener("resize", updateViewport);
+      viewport.removeEventListener("scroll", updateViewport);
+    };
   }, [open]);
   const indexed = useMemo(
     () => docs.map((doc) => ({ doc, text: normalizeSearch(doc.title) })),
