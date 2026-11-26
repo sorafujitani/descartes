@@ -355,7 +355,22 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Re
       }
     },
     async get(id): Promise<Document> {
-      // Always obtain the current SHA; immutable content may then be reused safely.
+      // The tree SHA may be up to TREE_TTL old; saves stay safe because GitHub rejects stale SHAs.
+      const entry = (await snapshot()).find((e) => e.id === id);
+      if (entry) {
+        const { sha } = entry;
+        let markdown = contents.has(sha)
+          ? await blob(sha)
+          : await indexed((database) => database.markdown(sha));
+        if (markdown !== undefined) remember(sha, markdown);
+        else {
+          const loaded = await blob(sha);
+          await indexed((database) => database.put([{ sha, markdown: loaded }]));
+          markdown = loaded;
+        }
+        return { id, markdown, title: titleOf(markdown) || id, sha };
+      }
+      // Not in the snapshot yet (e.g. created by another isolate within the TTL): ask GitHub directly.
       const data = await (await call("/contents/docs/" + id + ".md?ref=" + ref)).json();
       if (data.encoding !== "base64") fail(413, "Document is too large.");
       const markdown = decode(data.content);

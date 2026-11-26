@@ -17,7 +17,7 @@ function fixture(count: number) {
     active = 0,
     maxActive = 0;
   let failBlob = false;
-  const calls = { tree: 0, blob: 0, write: 0, metadata: 0, conditional: 0 };
+  const calls = { tree: 0, blob: 0, write: 0, metadata: 0, conditional: 0, contents: 0 };
   const docs = new Map(
     Array.from({ length: count }, (_, i) => [
       idOf(i),
@@ -76,7 +76,9 @@ function fixture(count: number) {
       docs.set(id, { sha, markdown: Buffer.from(data.content, "base64").toString() });
       return Response.json({ content: { sha } });
     }
-    const doc = docs.get(id)!;
+    calls.contents++;
+    const doc = docs.get(id);
+    if (!doc) return new Response(null, { status: 404 });
     return Response.json({
       ...doc,
       encoding: "base64",
@@ -140,17 +142,63 @@ test("save invalidates tree immediately and seeds the title and full-text caches
   const f = fixture(1);
   const before = await f.store.get(idOf(0));
   await f.store.list(0);
-  assert.equal(f.calls.blob, 0);
+  assert.equal(f.calls.tree, 1);
+  assert.equal(f.calls.blob, 1);
   const saved = await f.store.save(before.id, "# Renamed\n新しい検索語", before.sha);
   assert.notEqual(saved.sha, before.sha);
   const after = await f.store.list(0);
   assert.deepEqual(after.items, [{ id: saved.id, title: "Renamed" }]);
   assert.equal(f.calls.tree, 2);
-  assert.equal(f.calls.blob, 0);
+  assert.equal(f.calls.blob, 1);
   assert.equal((await f.store.search("新しい検索語")).items[0]?.id, before.id);
   assert.equal((await f.store.search("performance")).items.length, 0);
   await assert.rejects(f.store.save(before.id, "# stale", before.sha), { status: 409 });
   assert.equal((await f.store.get(before.id)).markdown, saved.markdown);
+});
+
+test("opening a listed document reuses the tree SHA and cached body without the Contents API", async () => {
+  const f = fixture(2);
+  await f.store.list(0);
+  const doc = await f.store.get(idOf(1));
+  assert.deepEqual(doc, {
+    id: idOf(1),
+    markdown: "# Note 1\n本文 1 performance",
+    title: "Note 1",
+    sha: shaOf(2),
+  });
+  assert.equal(f.calls.contents, 0);
+  assert.equal(f.calls.tree, 1);
+  assert.equal(f.calls.blob, 2);
+  await f.store.get(idOf(1));
+  assert.equal(f.calls.contents + f.calls.tree + f.calls.blob, 3);
+});
+
+test("an id missing from the snapshot falls back to the Contents API and keeps 404", async () => {
+  const f = fixture(1);
+  await f.store.list(0);
+  f.externalEdit(idOf(7), "# Created elsewhere"); // e.g. another isolate, within the tree TTL
+  assert.equal((await f.store.get(idOf(7))).title, "Created elsewhere");
+  assert.equal(f.calls.contents, 1);
+  await assert.rejects(f.store.get(idOf(8)), { status: 404 });
+  assert.equal(f.calls.contents, 2);
+  assert.equal(f.calls.tree, 1);
+});
+
+test("external edits become readable after the tree TTL and stale SHAs still conflict on save", async () => {
+  const f = fixture(1);
+  const before = await f.store.get(idOf(0));
+  f.externalEdit(idOf(0), "# 外部編集");
+  const stale = await f.store.get(idOf(0));
+  assert.equal(stale.sha, before.sha); // Bounded 15s staleness.
+  await assert.rejects(f.store.save(stale.id, "# overwrite", stale.sha), { status: 409 });
+  assert.equal(f.docs.get(idOf(0))!.markdown, "# 外部編集");
+  const current = await f.store.get(idOf(0)); // The failed write invalidated the snapshot.
+  assert.equal(current.title, "外部編集");
+  f.externalEdit(idOf(0), "# Second edit");
+  assert.equal((await f.store.get(idOf(0))).title, "外部編集");
+  f.advance();
+  assert.equal((await f.store.get(idOf(0))).title, "Second edit");
+  assert.equal(f.calls.contents, 0);
 });
 
 test("failed blob loads can be retried and do not poison single-flight state", async () => {
