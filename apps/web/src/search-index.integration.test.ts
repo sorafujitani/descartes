@@ -1,6 +1,6 @@
 import { test } from "vite-plus/test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { Miniflare } from "miniflare";
 import { SearchIndex, type SearchDatabase } from "../../api/src/search-index.ts";
 
@@ -29,17 +29,15 @@ test("real workerd D1 supports the migration, trigram queries and immutable-vers
   });
   try {
     const db = await mf.getD1Database("SEARCH_DB");
-    const migration = await readFile(
-      new URL("../../api/migrations/0001_search.sql", import.meta.url),
-      "utf8",
-    );
-    // Apply the same SQL used by the deployment migration, including real FTS triggers.
-    await db.exec(
-      migration
-        .split("\n")
-        .filter((line) => !line.trimStart().startsWith("--"))
-        .join("\n"),
-    );
+    // Apply the same SQL, in order, as the deployment migrations, including real FTS triggers.
+    const migrations = new URL("../../api/migrations/", import.meta.url);
+    for (const name of (await readdir(migrations)).filter((f) => f.endsWith(".sql")).sort())
+      await db.exec(
+        (await readFile(new URL(name, migrations), "utf8"))
+          .split("\n")
+          .filter((line) => !line.trimStart().startsWith("--"))
+          .join("\n"),
+      );
     const credentials = {
       GITHUB_REPOSITORY: "u/repo",
       GITHUB_BRANCH: "main",
@@ -64,6 +62,23 @@ test("real workerd D1 supports the migration, trigram queries and immutable-vers
     await restarted.prune([entry]);
     assert.equal(await restarted.contains([{ id: "old", sha: "4".repeat(40) }]), false);
     assert.equal((await restarted.search([entry], "needle"))[0].id, entry.id);
+    // A whole-tree check syncs the observed tree into current_docs.
+    assert.equal((await restarted.searchComplete([entry], "needle"))?.[0].id, entry.id);
+    const rows = await db.prepare("SELECT id, sha FROM current_docs").all();
+    assert.deepEqual(rows.results, [entry]);
+    // Another isolate replaces the rows; this one must fall back instead of using them.
+    const other = { id: "other", sha: "5".repeat(40) };
+    await restarted.put([{ sha: other.sha, markdown: "# Other\nneedle" }]);
+    const isolate = new SearchIndex(db as unknown as SearchDatabase, credentials);
+    assert.equal((await isolate.searchComplete([other], "needle"))?.[0].id, other.id);
+    assert.equal((await restarted.searchComplete([entry], "needle"))?.[0].id, entry.id);
+    const many = Array.from({ length: 5_000 }, (_, n) => ({
+      id: `00000000-0000-0000-0000-${n.toString(16).padStart(12, "0")}`,
+      sha: n ? n.toString(16).padStart(40, "a") : entry.sha,
+    }));
+    // Incomplete (most SHAs are not indexed), but a 5,000-note tree fits D1's limits.
+    assert.equal(await isolate.searchComplete(many, "needle"), null);
+    assert.equal((await db.prepare("SELECT count(*) AS n FROM current_docs").first())?.n, 5_000);
     await db.prepare("DELETE FROM search_blobs").run();
     assert.equal(await restarted.contains([entry]), false);
     assert.equal((await restarted.search([entry], "needle")).length, 0);

@@ -125,3 +125,142 @@ test("queries keep bound variable counts bounded and titles rank ahead of body h
     db.close();
   }
 });
+
+const uuid = (n: number) => `00000000-0000-0000-0000-${n.toString(16).padStart(12, "0")}`;
+const ids = (results: { id: string }[] | null) => results?.map((result) => result.id).sort();
+
+test("a synced tree is queried from current_docs without binding the tree, and cold isolates write no rows", async () => {
+  const db = new SqliteD1();
+  try {
+    const count = 5_000;
+    const entries = Array.from({ length: count }, (_, n) => ({ id: uuid(n), sha: sha(n + 1) }));
+    const first = new SearchIndex(db, credentials);
+    await first.put(
+      entries.map((entry, n) => ({
+        sha: entry.sha,
+        markdown: `# Note ${n}\nbody ${n % 100 === 0 ? "needle" : "plain"}`,
+      })),
+    );
+    const expected = entries.filter((_, n) => n % 100 === 0).map((entry) => entry.id);
+    const treeBytes = JSON.stringify(entries.map(({ id, sha }) => [id, sha])).length;
+    assert.ok(treeBytes > 400_000);
+
+    let before = db.requests.length;
+    assert.deepEqual(ids(await first.searchComplete(entries, "needle")), expected);
+    const sync = db.requests.slice(before);
+    assert.equal(sync.length, 1); // Replacement, check, completeness and search share one batch.
+    // D1 limits: 100 KB per SQL statement, 2 MB per bound string or BLOB.
+    assert.ok(sync[0].maxSql < 100_000 && sync[0].maxBound < 2_000_000);
+    assert.equal(db.sqlite.prepare("SELECT count(*) AS n FROM current_docs").get()!.n, count);
+
+    before = db.requests.length;
+    assert.deepEqual(ids(await first.searchComplete(entries, "needle")), expected);
+    assert.equal(await first.contains(entries), true);
+    for (const request of db.requests.slice(before)) assert.ok(request.bytes < 4_000);
+
+    // A cold isolate re-sends the tree once, but rewrites nothing when the table is current.
+    const changes = () => db.sqlite.prepare("SELECT total_changes() AS n").get()!.n as number;
+    const written = changes();
+    const cold = new SearchIndex(db, credentials);
+    assert.deepEqual(ids(await cold.searchComplete([...entries].reverse(), "needle")), expected);
+    assert.equal(changes(), written);
+
+    const changed = entries.slice(1);
+    assert.deepEqual(ids(await cold.searchComplete(changed, "needle")), expected.slice(1));
+    assert.equal(db.sqlite.prepare("SELECT count(*) AS n FROM current_docs").get()!.n, count - 1);
+  } finally {
+    db.close();
+  }
+}, 30_000);
+
+test("rows written for another isolate's tree are never used: the query falls back to the bound tree", async () => {
+  const db = new SqliteD1();
+  try {
+    const index = new SearchIndex(db, credentials);
+    await index.put([
+      { sha: sha(1), markdown: "# A\nneedle" },
+      { sha: sha(2), markdown: "# B\nneedle" },
+    ]);
+    const treeA = [{ id: "a", sha: sha(1) }];
+    const treeB = [{ id: "b", sha: sha(2) }];
+    const isolateA = new SearchIndex(db, credentials);
+    const isolateB = new SearchIndex(db, credentials);
+    assert.deepEqual(ids(await isolateA.searchComplete(treeA, "needle")), ["a"]);
+    assert.deepEqual(ids(await isolateB.searchComplete(treeB, "needle")), ["b"]);
+    // A still believes the table holds its tree; the version check rejects B's rows.
+    let trips = db.roundTrips;
+    assert.deepEqual(ids(await isolateA.searchComplete(treeA, "needle")), ["a"]);
+    assert.equal(db.roundTrips - trips, 2); // Table attempt plus JSON fallback.
+    // The next request re-syncs A's tree and uses the table again.
+    assert.deepEqual(ids(await isolateA.searchComplete(treeA, "needle")), ["a"]);
+    trips = db.roundTrips;
+    assert.deepEqual(ids(await isolateA.searchComplete(treeA, "needle")), ["a"]);
+    assert.equal(db.roundTrips - trips, 1);
+
+    // Pruning by B's rows would delete A's current blob.
+    assert.deepEqual(ids(await isolateB.searchComplete(treeB, "needle")), ["b"]);
+    await isolateA.prune(treeA);
+    assert.equal(await isolateA.contains(treeA), true);
+    assert.equal(await isolateB.contains(treeB), false);
+  } finally {
+    db.close();
+  }
+});
+
+test("concurrent isolates with different trees each get results for the tree they observed", async () => {
+  const db = new SqliteD1();
+  try {
+    const all = Array.from({ length: 40 }, (_, n) => ({ id: uuid(n), sha: sha(n + 1) }));
+    await new SearchIndex(db, credentials).put(
+      all.map((entry, n) => ({ sha: entry.sha, markdown: `# Note ${n}\nneedle ${n}` })),
+    );
+    const trees = [all.slice(0, 10), all.slice(5, 30), all.slice(20), all.filter((_, n) => n % 3)];
+    const isolates = Array.from({ length: 8 }, () => new SearchIndex(db, credentials));
+    for (let round = 0; round < 6; round++) {
+      await Promise.all(
+        isolates.map(async (isolate, i) => {
+          const tree = trees[(i + round) % trees.length];
+          const results = await isolate.searchComplete(tree, "needle");
+          assert.deepEqual(ids(results), tree.map((entry) => entry.id).sort());
+          assert.equal(await isolate.contains(tree), true);
+        }),
+      );
+    }
+    // The table always describes exactly the tree its version names.
+    const scope = db.sqlite.prepare("SELECT scope, version FROM tree_state").get()!;
+    const rows = db.sqlite
+      .prepare("SELECT id, sha FROM current_docs WHERE scope = ? ORDER BY id")
+      .all(scope.scope as string)
+      .map((row) => JSON.stringify([row.id, row.sha]));
+    const described = trees.filter(
+      (tree) =>
+        JSON.stringify(tree.map(({ id, sha }) => JSON.stringify([id, sha]))) ===
+        JSON.stringify(rows),
+    );
+    assert.equal(described.length, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test("a database without the current_docs migration keeps searching with the bound tree", async () => {
+  const db = new SqliteD1();
+  try {
+    db.sqlite.exec("DROP TABLE current_docs");
+    db.sqlite.exec("DROP TABLE tree_state");
+    const index = new SearchIndex(db, credentials);
+    await index.put([
+      { sha: sha(1), markdown: "# One\nneedle" },
+      { sha: sha(2), markdown: "# Old\nneedle" },
+    ]);
+    const tree = [{ id: "1", sha: sha(1) }];
+    assert.deepEqual(ids(await index.searchComplete(tree, "needle")), ["1"]);
+    const trips = db.roundTrips;
+    assert.equal(await index.contains(tree), true);
+    assert.equal(db.roundTrips - trips, 1); // The missing table is not retried on every request.
+    await index.prune(tree);
+    assert.equal(db.sqlite.prepare("SELECT count(*) AS n FROM search_blobs").get()!.n, 1);
+  } finally {
+    db.close();
+  }
+});
