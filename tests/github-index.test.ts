@@ -164,7 +164,7 @@ test("SHA reconciliation handles renames, deleted files and external edits witho
   }
 });
 
-test("an unavailable or unmigrated index falls back, and never reports a successful commit as a failed save", async () => {
+test("an unmigrated index makes search unavailable, and never reports a successful commit as a failed save", async () => {
   const db = new SqliteD1();
   const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
   try {
@@ -179,11 +179,63 @@ test("an unavailable or unmigrated index falls back, and never reports a success
     const saved = await store.save(read.id, "# Successfully committed\nbody", read.sha);
     assert.notEqual(saved.sha, read.sha);
     assert.equal(f.counts.writes, 1);
-    assert.equal((await apiFor(store).search("committed")).items[0].title, saved.title);
+    await assert.rejects(apiFor(store).search("committed"), { status: 503 });
     assert.equal(warning.mock.calls.length, 1); // Failure backoff avoids retry storms.
     assert.doesNotMatch(JSON.stringify(warning.mock.calls), /Successfully|fixture|needle/);
   } finally {
     warning.mockRestore();
+    db.close();
+  }
+});
+
+test("a D1 outage returns 503 without scanning GitHub and search recovers after the backoff", async () => {
+  const db = new SqliteD1();
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const f = fixture(db, 2);
+    const store = f.fresh();
+    assert.equal((await apiFor(store).search("needle")).items.length, 2);
+    const { batch, prepare } = db;
+    db.batch = db.prepare = () => {
+      throw new Error("D1 unavailable");
+    };
+    const blobs = f.counts.blobs;
+    for (let i = 0; i < 2; i++)
+      await assert.rejects(apiFor(store).search("needle"), {
+        status: 503,
+        message: "検索インデックスを利用できません。",
+      });
+    assert.equal(f.counts.blobs, blobs);
+    assert.equal(warning.mock.calls.length, 1); // The second request is rejected by the backoff.
+    Object.assign(db, { batch, prepare });
+    f.advance();
+    assert.equal((await apiFor(store).search("needle")).items.length, 2);
+  } finally {
+    warning.mockRestore();
+    db.close();
+  }
+});
+
+test("cold indexed search hydrates one bounded page of GitHub reads per request", async () => {
+  const db = new SqliteD1();
+  try {
+    const f = fixture(db, 130);
+    const store = f.fresh();
+    let cursor: number | null = 0;
+    let last;
+    do {
+      const before = f.counts.tree + f.counts.blobs + f.counts.metadata;
+      await store.privateOnly();
+      const page = await store.search("needle", cursor);
+      // Leaves room for Access JWKS and D1 writes within Workers Free's 50 subrequests.
+      assert.ok(f.counts.tree + f.counts.blobs + f.counts.metadata - before <= 18);
+      last = page;
+      cursor = page.next;
+    } while (cursor !== null);
+    // The final page has completed the index, so it returns the globally ranked, bounded result.
+    assert.equal(last.items.length, 50);
+    assert.equal(f.counts.blobs, 130);
+  } finally {
     db.close();
   }
 });
