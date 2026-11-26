@@ -8,8 +8,8 @@ import {
   type Page,
   type SearchResult,
 } from "@descartes/shared";
-import { fail, type Repository } from "./repository.ts";
-import { SearchIndex, type SearchDatabase, type IndexEntry } from "./search-index.ts";
+import { fail, HttpError, type Repository } from "./repository.ts";
+import { SearchIndex, type SearchDatabase, type IndexEntry as Entry } from "./search-index.ts";
 export { fail, HttpError } from "./repository.ts";
 export interface Env {
   GITHUB_REPOSITORY: string;
@@ -34,7 +34,6 @@ const CONCURRENCY = 6;
 const TREE_TTL = 15_000;
 const PRUNE_INTERVAL = 10 * 60_000;
 const CONTENT_BUDGET = 8 * 1024 * 1024;
-type Entry = { path: string; sha: string; type: string };
 
 async function mapConcurrent<T, R>(items: T[], fn: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = [];
@@ -60,6 +59,8 @@ async function mapConcurrent<T, R>(items: T[], fn: (item: T) => Promise<R>): Pro
 export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Repository {
   const root = "https://api.github.com/repos/" + env.GITHUB_REPOSITORY;
   const ref = encodeURIComponent(env.GITHUB_BRANCH || "main");
+  // Only the docs subtree is listed, so screenshots in assets/ can never make the tree truncate.
+  const docsTree = "/git/trees/" + encodeURIComponent((env.GITHUB_BRANCH || "main") + ":docs");
   const index = env.SEARCH_DB ? new SearchIndex(env.SEARCH_DB, env) : undefined;
   // Worst case: one GitHub read and one D1 write per large document, plus auth/metadata/query overhead.
   const pageSize = index ? 16 : PAGE_SIZE;
@@ -75,8 +76,6 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Re
       return undefined;
     }
   }
-  const entriesOf = (entries: Entry[]): IndexEntry[] =>
-    entries.map((entry) => ({ id: entry.path.slice(5, -3), sha: entry.sha }));
   const titles = new Map<string, string>();
   const contents = new Map<string, string>();
   const loading = new Map<string, Promise<string>>();
@@ -181,20 +180,31 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Re
     const version = generation;
     const previous = tree;
     const promise = (async () => {
-      const response = await call("/git/trees/" + ref + "?recursive=1", {
-        headers: previous?.etag ? { "If-None-Match": previous.etag } : {},
-      });
+      let response: Response | undefined;
+      try {
+        response = await call(docsTree, {
+          headers: previous?.etag ? { "If-None-Match": previous.etag } : {},
+        });
+      } catch (error) {
+        if (!(error instanceof HttpError) || error.status !== 404) throw error;
+        // A missing branch and a branch without docs/ both 404; only the latter is an empty notebook.
+        await call("/git/trees/" + ref);
+      }
       let entries: Entry[];
-      if (response.status === 304 && previous) entries = previous.entries;
+      if (response?.status === 304 && previous) entries = previous.entries;
       else {
-        const data = await response.json();
+        const data = response ? await response.json() : { tree: [] };
         if (data.truncated) fail(503, "Repository tree is too large.");
-        entries = (data.tree as Entry[]).filter((f) => f.type === "blob" && docPath.test(f.path));
-        entries.sort((a, b) => a.path.localeCompare(b.path));
+        entries = [];
+        for (const f of data.tree as { path: string; sha: string; type: string }[]) {
+          const id = f.type === "blob" && docPath.exec("docs/" + f.path)?.[1];
+          if (id) entries.push({ id, sha: f.sha });
+        }
+        entries.sort((a, b) => a.id.localeCompare(b.id));
         if (version === generation && now() - prunedAt >= PRUNE_INTERVAL) {
           prunedAt = now();
           // A save racing this tree read may lose its fresh row; that only costs one re-fetch.
-          await indexed((database) => database.prune(entriesOf(entries)));
+          await indexed((database) => database.prune(entries));
         }
       }
       if (version === generation) {
@@ -202,7 +212,8 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Re
         tree = {
           entries,
           etag:
-            response.headers.get("ETag") ?? (response.status === 304 ? previous?.etag : undefined),
+            response?.headers.get("ETag") ??
+            (response?.status === 304 ? previous?.etag : undefined),
           expires: now() + TREE_TTL,
         };
       }
@@ -283,10 +294,9 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Re
       }));
       for (const { sha, markdown } of loaded) known.set(sha, titleOf(markdown).slice(0, 512));
       await indexed((database) => database.put(loaded));
-      const items = docs.slice(cursor, end).map((f) => {
-        const id = f.path.slice(5, -3);
-        return { id, title: known.get(f.sha) || id };
-      });
+      const items = docs
+        .slice(cursor, end)
+        .map((f) => ({ id: f.id, title: known.get(f.sha) || f.id }));
       return { items, next: end < docs.length ? end : null };
     },
     async search(query, cursor = 0) {
@@ -295,16 +305,15 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Re
       const entries = await snapshot();
       const page = entries.slice(cursor, cursor + pageSize);
       if (index && now() >= indexRetryAt) {
-        const full = entriesOf(entries);
-        const ready = await indexed((database) => database.searchComplete(full, query));
+        const ready = await indexed((database) => database.searchComplete(entries, query));
         if (ready) return { items: ready, next: null };
         if (ready === null && (await hydrate(page))) {
           const last = cursor + page.length >= entries.length;
           const complete = last
-            ? await indexed((database) => database.searchComplete(full, query))
+            ? await indexed((database) => database.searchComplete(entries, query))
             : null;
           if (complete) return { items: complete, next: null };
-          const items = await indexed((database) => database.search(entriesOf(page), query));
+          const items = await indexed((database) => database.search(page, query));
           if (items) return { items, next: last ? null : cursor + page.length };
         }
       }
@@ -315,9 +324,8 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Re
       if (running?.entries === entries) return running.promise;
       const promise = (async () => {
         const matches = await mapConcurrent(page, async (f) => {
-          const id = f.path.slice(5, -3);
           const markdown = await blob(f.sha);
-          return matchDocument(id, titles.get(f.sha) || id, markdown, terms);
+          return matchDocument(f.id, titles.get(f.sha) || f.id, markdown, terms);
         });
         const results = {
           items: rankResults(matches.filter((match): match is SearchResult => match !== undefined)),

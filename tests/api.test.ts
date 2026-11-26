@@ -87,7 +87,7 @@ test("GitHub adapter writes UTF-8 to the specified branch and forwards the read 
     const path = new URL(String(url)).pathname;
     if (path.endsWith("/repo")) return Response.json({ private: true });
     if (path.includes("/git/trees/"))
-      return Response.json({ tree: [{ path: "docs/" + id + ".md", sha, type: "blob" }] });
+      return Response.json({ tree: [{ path: id + ".md", sha, type: "blob" }] });
     if (path.endsWith("/git/blobs/" + sha))
       return Response.json({ content: Buffer.from(markdown).toString("base64") });
     assert.ok(path.endsWith("/contents/docs/" + id + ".md"));
