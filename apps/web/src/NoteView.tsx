@@ -579,7 +579,7 @@ const noteTheme = EditorView.theme(
     ".cm-scroller": { fontFamily: "inherit", lineHeight: "1.6", overflow: "visible" },
     ".cm-content": { padding: "0.5rem 0 1rem", minHeight: "16rem", overflowWrap: "anywhere" },
     ".cm-line": { padding: "2px 0" },
-    ".cm-cursor": { borderLeftColor: "var(--color-text)" },
+    ".cm-cursor": { borderLeftColor: "var(--color-text)", transform: "scaleY(0.8)" },
     // Selection is translucent and drawn behind the text, so selected text stays readable. The
     // focused selector matches CodeMirror's own (more specific) one, which otherwise wins with an
     // opaque light-theme lavender.
