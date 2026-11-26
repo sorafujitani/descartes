@@ -97,8 +97,13 @@ final class NotebookTests: XCTestCase {
     let api = try API(demo: true)
     let text = "# macOS test \(UUID())\n\n日本語"
     let created = try await api.save(text, base: nil)
-    let list = try await api.list()
-    XCTAssertTrue(list.contains(where: { $0.id == created.id }))
+    let listResponse = try await api.list()
+    let list = try XCTUnwrap(listResponse)
+    XCTAssertTrue(list.items.contains(where: { $0.id == created.id }))
+    if let etag = list.etag {
+      let unchanged = try await api.list(etag: etag)
+      XCTAssertNil(unchanged)
+    }
     let read = try await api.get(created.id)
     XCTAssertEqual(read.markdown, text)
     let edited = try await api.save(text + "\n追記", base: read)

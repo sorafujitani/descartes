@@ -11,6 +11,8 @@ import SwiftUI
     var retry: Duration = .seconds(30)
   }
   typealias Store = (_ markdown: String, _ base: Document?) async throws -> Document
+  /// Fetches the title list; `nil` means the list with the given ETag is still current.
+  typealias Lister = (_ etag: String?) async throws -> TitleList?
 
   @Published var text = "# " {
     didSet { if text != oldValue { scheduleAutosave() } }
@@ -33,20 +35,39 @@ import SwiftUI
   @Published var message = ""
   @Published var query = ""
   @Published var items: [Summary] = []
+  /// A background title refresh; unlike `busy`, it never blocks opening a listed note.
+  @Published private(set) var refreshing = false
   let demo: Bool
   /// The editor page showing this notebook (see Editor.swift).
   let editor = EditorBridge()
   var timing = Timing()
   private let store: Store
+  private let lister: Lister
+  private let listFile: URL
+  private var listETag: String?
+  private var refreshTask: Task<Void, Never>?
   private var saveTask: Task<Bool, Never>?
   private var inFlight: String?
   private var again = false
   private var autosaveTimer: Task<Void, Never>?
   private var dirtySince: ContinuousClock.Instant?
 
-  init(demo: Bool, store: Store? = nil) {
+  /// `listFile` keeps the last complete title list (ids and titles only, never note bodies) so
+  /// the picker has something to show before the network answers.
+  init(demo: Bool, store: Store? = nil, lister: Lister? = nil, listFile: URL? = nil) {
     self.demo = demo
     self.store = store ?? { try await API(demo: demo).save($0, base: $1) }
+    self.lister = lister ?? { try await API(demo: demo).list(etag: $0) }
+    self.listFile =
+      listFile
+      ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+      .appending(path: "Descartes/" + (demo ? "titles-demo.json" : "titles.json"))
+    if let data = try? Data(contentsOf: self.listFile),
+      let cached = try? JSONDecoder().decode(TitleList.self, from: data)
+    {
+      items = cached.items
+      listETag = cached.etag
+    }
   }
   var dirty: Bool { text != (base?.markdown ?? "# ") }
   static func title(of text: String) -> String {
@@ -92,6 +113,7 @@ import SwiftUI
     editor.sync()
   }
   func start() {
+    refreshList()
     if let raw = UserDefaults.standard.string(forKey: lastKey), let id = UUID(uuidString: raw) {
       open(id)
     }
@@ -115,8 +137,31 @@ import SwiftUI
   func browse() {
     guard !busy else { return }
     query = ""
+    message = ""
     picking = true
-    perform { self.items = try await $0.list() }
+    refreshList()
+  }
+  /// Revalidates the title list in the background. An unchanged list costs an empty 304.
+  func refreshList() {
+    guard refreshTask == nil else { return }
+    refreshing = true
+    refreshTask = Task { [self] in
+      defer {
+        refreshing = false
+        refreshTask = nil
+      }
+      do {
+        guard let fresh = try await lister(listETag) else { return }
+        items = fresh.items
+        listETag = fresh.etag
+        try? FileManager.default.createDirectory(
+          at: listFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // The cache is only a head start, so failing to write it is not worth reporting.
+        try? JSONEncoder().encode(fresh).write(to: listFile, options: .atomic)
+      } catch {
+        message = error.localizedDescription
+      }
+    }
   }
   func open(_ id: UUID) {
     whenSaved { [self] in

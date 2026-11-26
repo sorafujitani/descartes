@@ -127,7 +127,7 @@ struct PickerSheet: View {
                 in: RoundedRectangle(cornerRadius: 7)
               ).id(row.id)
             }
-            if rows.isEmpty && !book.busy {
+            if rows.isEmpty && !book.busy && !book.refreshing {
               Text("該当する文書はありません").font(.callout).foregroundStyle(.secondary).padding()
             }
           }
@@ -135,7 +135,7 @@ struct PickerSheet: View {
       }
       if !book.message.isEmpty { Text(book.message).font(.caption) }
       HStack {
-        Text(book.busy ? "通信中…" : "↑ ↓ 選択　↩ 開く")
+        Text(book.busy || book.refreshing && book.items.isEmpty ? "通信中…" : "↑ ↓ 選択　↩ 開く")
         Spacer()
         Button("Esc 閉じる") { book.picking = false }.buttonStyle(.plain).keyboardShortcut(
           .cancelAction)
