@@ -926,10 +926,21 @@ export const NoteView = forwardRef<
               const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
               if (pos == null) return false;
               const line = view.state.doc.lineAt(pos);
-              const url = linkAt(line.text, pos - line.from);
-              if (!url) return false;
+              const href = linkAt(line.text, pos - line.from);
+              if (!href) return false;
+              let url: URL;
+              try {
+                url = new URL(href);
+              } catch {
+                return false;
+              }
+              if (url.protocol !== "https:" && url.protocol !== "http:") return false;
               event.preventDefault();
-              window.open(url, "_blank", "noopener,noreferrer");
+              const link = document.createElement("a");
+              link.href = url.href;
+              link.target = "_blank";
+              link.rel = "noopener noreferrer";
+              link.click();
               return true;
             },
           }),

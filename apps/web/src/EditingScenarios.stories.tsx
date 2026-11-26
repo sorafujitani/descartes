@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { EditorSelection } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { expect, waitFor } from "storybook/test";
+import { expect, spyOn, waitFor } from "storybook/test";
 import { NoteView } from "./NoteView";
 import fixtures from "../../../tests/fixtures/editing-scenarios.json";
 
@@ -154,7 +154,7 @@ export const RichMarkdown: StoryObj<typeof meta> = {
     });
     const view = EditorView.findFromDOM(dom)!;
     const doc =
-      "# T\n1. [ ] 一\n2. [x] 二\n> 引用\n~~消す~~\n[サイト](https://example.com/a)\n末尾";
+      "# T\n1. [ ] 一\n2. [x] 二\n> 引用\n~~消す~~\n[サイト](https://example.com/a)\n[無効](https://example.com:wrong)\n末尾";
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: doc } });
     view.focus();
     view.dispatch({ selection: { anchor: doc.length } });
@@ -167,15 +167,15 @@ export const RichMarkdown: StoryObj<typeof meta> = {
     await expect(view.state.doc.toString()).toContain("\n引用\n");
     // ⌘-click (Ctrl-click elsewhere) on a link opens it; a plain click only moves the caret.
     const opened: string[] = [];
-    const open = window.open;
-    window.open = ((url?: string | URL) => {
-      opened.push(String(url));
-      return null;
-    }) as typeof window.open;
+    const clickLink = spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      opened.push(this.href);
+    });
     try {
-      const at = view.state.doc.toString().indexOf("サイト") + 1;
-      const point = view.coordsAtPos(at)!;
-      const press = (modifier: boolean) =>
+      const press = (label: string, modifier: boolean) => {
+        const at = view.state.doc.toString().indexOf(label) + 1;
+        const point = view.coordsAtPos(at)!;
         view.contentDOM.dispatchEvent(
           new MouseEvent("mousedown", {
             bubbles: true,
@@ -187,12 +187,14 @@ export const RichMarkdown: StoryObj<typeof meta> = {
             ctrlKey: modifier && !/Mac/.test(navigator.platform),
           }),
         );
-      press(false);
+      };
+      press("サイト", false);
+      press("無効", true);
       await expect(opened).toEqual([]);
-      press(true);
+      press("サイト", true);
       await expect(opened).toEqual(["https://example.com/a"]);
     } finally {
-      window.open = open;
+      clickLink.mockRestore();
     }
   },
 };
