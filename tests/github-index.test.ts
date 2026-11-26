@@ -34,7 +34,7 @@ function fixture(db: SqliteD1, count = 65) {
     if (url.pathname.includes("/git/trees/")) {
       counts.tree++;
       return Response.json({
-        tree: [...docs].map(([id, doc]) => ({ path: `docs/${id}.md`, sha: doc.sha, type: "blob" })),
+        tree: [...docs].map(([id, doc]) => ({ path: `${id}.md`, sha: doc.sha, type: "blob" })),
       });
     }
     if (url.pathname.includes("/git/blobs/")) {

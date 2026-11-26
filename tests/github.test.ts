@@ -41,7 +41,7 @@ function fixture(count: number) {
       return Response.json(
         {
           tree: [...docs].map(([id, doc]) => ({
-            path: `docs/${id}.md`,
+            path: `${id}.md`,
             type: "blob",
             sha: doc.sha,
           })),
@@ -190,14 +190,14 @@ test("a tree request started before a save cannot repopulate the invalidated sna
     if (init?.method === "PUT") return Response.json({ content: { sha: shaOf(2) } });
     if (String(input).includes("/git/trees/")) {
       if (++trees === 1) return old;
-      return Response.json({ tree: [{ path: `docs/${idOf(1)}.md`, sha: shaOf(2), type: "blob" }] });
+      return Response.json({ tree: [{ path: `${idOf(1)}.md`, sha: shaOf(2), type: "blob" }] });
     }
     return Response.json({ content: Buffer.from("# Old").toString("base64") });
   });
   const stale = store.list(0);
   await store.save(idOf(1), "# New");
   assert.equal((await store.list(0)).items[0].title, "New");
-  finishOld(Response.json({ tree: [{ path: `docs/${idOf(1)}.md`, sha: shaOf(1), type: "blob" }] }));
+  finishOld(Response.json({ tree: [{ path: `${idOf(1)}.md`, sha: shaOf(1), type: "blob" }] }));
   await stale;
   assert.equal((await store.list(0)).items[0].title, "New");
   assert.equal(trees, 2);
@@ -258,4 +258,50 @@ test("branch writes are serialized and a failed write does not stop the queue", 
   await rejection;
   assert.equal((await second).title, "second");
   assert.equal(writes, 2);
+});
+
+test("only the docs subtree is listed, so assets and other entries are never returned", async () => {
+  const requested: string[] = [];
+  const store = github(env, async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.includes("/git/trees/")) {
+      requested.push(url.pathname + url.search);
+      return Response.json({
+        tree: [
+          { path: `${idOf(2)}.md`, sha: shaOf(2), type: "blob" },
+          { path: "assets", sha: shaOf(3), type: "tree" },
+          { path: `${idOf(4)}.png`, sha: shaOf(4), type: "blob" },
+          { path: "readme.md", sha: shaOf(5), type: "blob" },
+          { path: `${idOf(6)}.md`, sha: shaOf(6), type: "tree" },
+          { path: `${idOf(1)}.md`, sha: shaOf(1), type: "blob" },
+        ],
+      });
+    }
+    return Response.json({ content: Buffer.from("# Title").toString("base64") });
+  });
+  const page = await store.list(0);
+  assert.deepEqual(requested, ["/repos/u/notebook/git/trees/notes%2Fmain%3Adocs"]);
+  assert.deepEqual(
+    page.items.map((item) => item.id),
+    [idOf(1), idOf(2)],
+  );
+});
+
+test("a branch without docs/ is an empty notebook, but a missing branch still fails", async () => {
+  const requested: string[] = [];
+  const store = github(env, async (input) => {
+    const path = new URL(String(input)).pathname;
+    requested.push(path);
+    if (path.endsWith("%3Adocs")) return new Response(null, { status: 404 });
+    return Response.json({ tree: [{ path: "assets", sha: shaOf(1), type: "tree" }] });
+  });
+  assert.deepEqual(await store.list(0), { items: [], next: null });
+  assert.deepEqual(await store.search("anything"), { items: [], next: null });
+  assert.deepEqual(requested, [
+    "/repos/u/notebook/git/trees/notes%2Fmain%3Adocs",
+    "/repos/u/notebook/git/trees/notes%2Fmain",
+  ]);
+
+  const missing = github(env, async () => new Response(null, { status: 404 }));
+  await assert.rejects(missing.list(0), { status: 404 });
 });
