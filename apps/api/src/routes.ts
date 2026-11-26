@@ -52,23 +52,48 @@ export function createApi<Bindings extends object>(
     c.header("X-Content-Type-Options", "nosniff");
     const req = c.req.raw;
     const store = await c.get("metrics").measure("auth", () => resolve(req, c.env));
+    const read = req.method === "GET" || req.method === "HEAD";
     if (
-      req.method !== "GET" &&
-      req.method !== "HEAD" &&
+      !read &&
       (req.headers.get("X-Descartes-Write") !== "1" ||
         (req.headers.has("Origin") && req.headers.get("Origin") !== new URL(req.url).origin))
     )
       fail(403, "Invalid write origin.");
-    await c.get("metrics").measure("privacy", () => store.privateOnly());
+    const privacy = c.get("metrics").measure("privacy", () => store.privateOnly());
     c.set("store", store);
+    if (!read) {
+      // Nothing may be written to a repository that has not been confirmed private.
+      await privacy;
+      await next();
+      return;
+    }
+    // Reads overlap the privacy round trip, but no response leaves before it succeeds.
+    privacy.catch(() => {});
     await next();
+    await privacy;
   });
   app.get("/api/docs", async (c) => {
-    return json(
-      await c
-        .get("metrics")
-        .measure("list", () => c.get("store").list(cursorOf(c.req.query("cursor")))),
-    );
+    const cursor = cursorOf(c.req.query("cursor"));
+    const page = await c.get("metrics").measure("list", () => c.get("store").list(cursor));
+    if (cursor !== 0 || page.next !== null) return json(page);
+    // A complete list carries a validator, so an unchanged list costs an empty 304.
+    const body = JSON.stringify(page);
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body));
+    const etag =
+      '"' +
+      Array.from(new Uint8Array(digest).subarray(0, 16), (byte) =>
+        byte.toString(16).padStart(2, "0"),
+      ).join("") +
+      '"';
+    const headers = {
+      "Cache-Control": "private, no-store",
+      "X-Content-Type-Options": "nosniff",
+      ETag: etag,
+    };
+    if (c.req.header("If-None-Match") === etag) return new Response(null, { status: 304, headers });
+    return new Response(body, {
+      headers: { ...headers, "Content-Type": "application/json" },
+    });
   });
   app.get("/api/search", async (c) => {
     const query = (c.req.query("q") ?? "").trim();

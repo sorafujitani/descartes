@@ -719,6 +719,8 @@ export const NoteView = forwardRef<
   rawRef.current = raw;
   const change = useRef(onChange);
   change.current = onChange;
+  /** The editor's text as last emitted or applied; echoing it back needs no comparison. */
+  const synced = useRef(source);
   useImperativeHandle(
     ref,
     () => ({
@@ -963,11 +965,13 @@ export const NoteView = forwardRef<
             if (
               update.docChanged &&
               !update.transactions.some((transaction) => transaction.annotation(externalChange))
-            )
+            ) {
+              synced.current = update.state.sliceDoc();
               change.current(
-                update.state.sliceDoc(),
+                synced.current,
                 update.transactions.some((transaction) => transaction.annotation(persistTask)),
               );
+            }
           }),
         ],
       }),
@@ -991,7 +995,9 @@ export const NoteView = forwardRef<
   }, [raw]);
   useLayoutEffect(() => {
     const view = editor.current;
-    if (!view || view.state.sliceDoc() === source) return;
+    if (!view || source === synced.current) return;
+    synced.current = source;
+    if (view.state.sliceDoc() === source) return;
     const incoming = view.state.toText(source);
     const next = incoming.toString();
     const previous = view.state.doc.toString();

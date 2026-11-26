@@ -81,3 +81,27 @@ test("client rejects a cyclic or invalid pagination cursor instead of looping fo
     await assert.rejects(api.list(), /Invalid document page/);
   }
 });
+
+test("client revalidates a complete title list with its ETag and stops on 304", async () => {
+  const seenHeaders: (string | null)[] = [];
+  const api = client("https://app.test", {}, async (_url, init) => {
+    const match = new Headers(init?.headers).get("If-None-Match");
+    seenHeaders.push(match);
+    return match === '"v1"'
+      ? new Response(null, { status: 304, headers: { ETag: '"v1"' } })
+      : Response.json(
+          { items: [{ id: "a", title: "A" }], next: null },
+          { headers: { ETag: '"v1"' } },
+        );
+  });
+  const seen: { etag?: string } = {};
+  const first = [];
+  for await (const page of api.pages(undefined, seen)) first.push(page);
+  assert.deepEqual(first, [[{ id: "a", title: "A" }]]);
+  assert.equal(seen.etag, '"v1"');
+  const second = [];
+  for await (const page of api.pages(undefined, seen)) second.push(page);
+  assert.deepEqual(second, []);
+  assert.equal(seen.etag, '"v1"');
+  assert.deepEqual(seenHeaders, [null, '"v1"']);
+});

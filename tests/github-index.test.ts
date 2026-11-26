@@ -95,14 +95,19 @@ test("persistent index survives adapter restarts and completes fully indexed sea
     assert.equal(coldPages, 5);
     const beforeBlobs = f.counts.blobs;
     let persistedPages = 0;
+    const roundTrips = db.roundTrips;
     const nextStarted = performance.now();
     const second = await apiFor(f.fresh(), () => persistedPages++).search("検索");
     const persistedMs = performance.now() - nextStarted;
     assert.equal(second.items.length, 50);
     assert.equal(f.counts.blobs, beforeBlobs);
     assert.equal(persistedPages, 1);
+    // Prune (first tree of a new adapter) plus one batched completeness check and search.
+    assert.equal(db.roundTrips - roundTrips, 2);
+    // Titles already in D1 need no GitHub reads, so the whole list is one page.
     const listed = await f.fresh().list(0);
-    assert.equal(listed.items.length, 16);
+    assert.equal(listed.items.length, 65);
+    assert.equal(listed.next, null);
     assert.equal(f.counts.blobs, beforeBlobs);
     if (process.env.DESCARTES_BENCHMARK === "1")
       console.info(
@@ -178,6 +183,31 @@ test("reading an old SHA after a newer save cannot replace the current indexed d
     const result = await apiFor(f.fresh()).search("current-term");
     assert.equal(result.items[0].title, updated.title);
     assert.equal((await apiFor(f.fresh()).search("needle")).items.length, 0);
+  } finally {
+    db.close();
+  }
+});
+
+test("a changed tree prunes versions that are no longer current, at most every ten minutes", async () => {
+  const db = new SqliteD1();
+  try {
+    const f = fixture(db, 2);
+    const store = f.fresh();
+    await apiFor(store).search("needle");
+    const rows = () => db.sqlite.prepare("SELECT count(*) AS count FROM search_blobs").get()!.count;
+    assert.equal(rows(), 2);
+    f.external(idOf(0), "# Edited\nneedle");
+    f.advance();
+    await apiFor(store).search("needle");
+    assert.equal(rows(), 3); // Within the interval the old version stays.
+    for (let i = 0; i < 20; i++) f.advance();
+    f.external(idOf(1), "# Edited too\nneedle");
+    await apiFor(store).search("needle");
+    assert.equal(rows(), 2);
+    assert.deepEqual(
+      (await apiFor(store).search("edited")).items.map((item) => item.title),
+      ["Edited", "Edited too"],
+    );
   } finally {
     db.close();
   }

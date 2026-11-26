@@ -29,6 +29,11 @@ const defaultApi = client(location.origin),
  */
 export const autosaveTiming = { idle: 4_000, max: 45_000, retry: 30_000 };
 const untitled = "1行目に「# タイトル」を入力してください。";
+/**
+ * A note read while it is highlighted in the switcher opens without a round trip. It is used only
+ * briefly: an older copy could be outdated, and saving it would then report a conflict.
+ */
+const PREFETCH_TTL = 10_000;
 export function App({
   api = defaultApi,
   initialId: requestedId,
@@ -139,6 +144,25 @@ export function App({
       /* location.href is always a valid URL in a browser. */
     }
   }, []);
+  const prefetched = useRef(new Map<string, { at: number; doc: Promise<Document> }>());
+  const prefetch = useCallback(
+    (id: string) => {
+      const hit = prefetched.current.get(id);
+      if (id === currentRef.current?.id || (hit && Date.now() - hit.at < PREFETCH_TTL)) return;
+      const doc = api.get(id);
+      const entry = { at: Date.now(), doc };
+      doc.catch(() => {
+        if (prefetched.current.get(id) === entry) prefetched.current.delete(id);
+      });
+      prefetched.current.set(id, entry);
+    },
+    [api],
+  );
+  const load = (id: string) => {
+    const hit = prefetched.current.get(id);
+    prefetched.current.clear();
+    return hit && Date.now() - hit.at < PREFETCH_TTL ? hit.doc : api.get(id);
+  };
   const unsaved = () => latestText.current !== (currentRef.current?.markdown ?? blank);
   const switchTo = useCallback(
     (id?: string) => {
@@ -147,7 +171,7 @@ export function App({
         // Save before leaving; ask only when the latest text could not be saved.
         await flush();
         if (unsaved() && !confirm("保存できなかった変更を破棄しますか？")) return;
-        select(id ? await api.get(id) : undefined);
+        select(id ? await load(id) : undefined);
       });
     },
     [run, select],
@@ -206,6 +230,7 @@ export function App({
           const doc = await api.save(draft, base, { keepalive });
           keepalive = false;
           upsert(doc);
+          prefetched.current.delete(doc.id);
           rememberNote(doc.id);
           if (owner !== session.current) return true;
           currentRef.current = doc;
@@ -401,6 +426,10 @@ export function App({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [busy, current, query, save, switchTo, text]);
+  const closePalette = useCallback(() => {
+    setPicking(false);
+    requestAnimationFrame(() => area.current?.focus());
+  }, []);
   const title = titleOf(text);
   useEffect(() => {
     document.title = title ? title + " — Descartes" : "Descartes";
@@ -539,11 +568,9 @@ export function App({
         loading={listing}
         error={listError}
         revision={revision}
-        onClose={() => {
-          setPicking(false);
-          requestAnimationFrame(() => area.current?.focus());
-        }}
+        onClose={closePalette}
         onSelect={switchTo}
+        onPreview={prefetch}
       />
       <dialog ref={help} aria-label="ショートカット">
         <h2>ショートカット</h2>
