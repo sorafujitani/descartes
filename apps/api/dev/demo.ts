@@ -13,7 +13,8 @@ export function memoryStore(): Repository {
   const docs = new Map<string, Document>(),
     images = new Map<string, Uint8Array<ArrayBuffer>>();
   return {
-    async privateOnly() {},
+    // The demo has no remote repository, so every check passes, fresh or not.
+    async privateOnly(_options?: { fresh?: boolean }) {},
     async list(cursor) {
       // Like the GitHub adapter with known titles: the whole list in one page.
       const items = Array.from(docs.values(), ({ id, title }) => ({ id, title }));

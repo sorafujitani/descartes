@@ -59,7 +59,7 @@ export function createApi<Bindings extends object>(
         (req.headers.has("Origin") && req.headers.get("Origin") !== new URL(req.url).origin))
     )
       fail(403, "Invalid write origin.");
-    const privacy = c.get("metrics").measure("privacy", () => store.privateOnly());
+    const privacy = c.get("metrics").measure("privacy", () => store.privateOnly({ fresh: !read }));
     c.set("store", store);
     if (!read) {
       // Nothing may be written to a repository that has not been confirmed private.

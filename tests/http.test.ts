@@ -95,8 +95,10 @@ test("reads overlap the privacy check but never answer before it passes; writes 
   let release!: (ok: boolean) => void;
   let listed = false;
   let saved = false;
-  const check = () =>
+  const freshness: (boolean | undefined)[] = [];
+  const check = (options?: { fresh?: boolean }) =>
     new Promise<void>((resolve, reject) => {
+      freshness.push(options?.fresh);
       release = (ok) =>
         ok ? resolve() : reject(new HttpError(403, "A private document repository is required."));
     });
@@ -131,4 +133,6 @@ test("reads overlap the privacy check but never answer before it passes; writes 
   assert.equal(saved, false);
   release(true);
   assert.equal((await write).status, 201);
+  // Reads may reuse a recent confirmation; writes must always ask GitHub again.
+  assert.deepEqual(freshness, [false, true]);
 });

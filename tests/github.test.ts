@@ -220,18 +220,44 @@ test("cold full-text scans stay within a per-request subrequest budget even beyo
   assert.ok(f.maxActive() <= 6);
 });
 
-test("repository privacy checks are not cached across requests", async () => {
-  let privateRepo = true,
-    calls = 0;
-  const store = github(env, async () => {
-    calls++;
-    return Response.json({ private: privateRepo });
-  });
+test("repository privacy is cached briefly for reads, never on failure, and never for writes", async () => {
+  let privateRepo: boolean | undefined = true,
+    calls = 0,
+    clock = 0;
+  const store = github(
+    env,
+    async () => {
+      calls++;
+      if (privateRepo === undefined) return new Response(null, { status: 502 });
+      return Response.json({ private: privateRepo });
+    },
+    () => clock,
+  );
   await Promise.all([store.privateOnly(), store.privateOnly()]);
   assert.equal(calls, 1);
+  clock = 59_999;
+  await store.privateOnly();
+  assert.equal(calls, 1);
+  await store.privateOnly({ fresh: true });
+  assert.equal(calls, 2);
+  clock = 59_999 + 60_000;
   privateRepo = false;
   await assert.rejects(store.privateOnly(), { status: 403 });
-  assert.equal(calls, 2);
+  assert.equal(calls, 3);
+  await assert.rejects(store.privateOnly(), { status: 403 });
+  assert.equal(calls, 4);
+  privateRepo = undefined;
+  await assert.rejects(store.privateOnly());
+  await assert.rejects(store.privateOnly());
+  assert.equal(calls, 6);
+  privateRepo = true;
+  await store.privateOnly();
+  assert.equal(calls, 7);
+  privateRepo = false;
+  await assert.rejects(store.privateOnly({ fresh: true }), { status: 403 });
+  // A failed fresh check also drops the earlier confirmation.
+  await assert.rejects(store.privateOnly(), { status: 403 });
+  assert.equal(calls, 9);
 });
 
 test("branch writes are serialized and a failed write does not stop the queue", async () => {

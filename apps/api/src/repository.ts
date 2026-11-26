@@ -2,7 +2,8 @@ import type { Document, Page, SearchResult, Summary } from "@descartes/shared";
 
 /** Storage boundary shared by the authenticated Worker and the loopback demo. */
 export interface Repository {
-  privateOnly(): Promise<void>;
+  /** Rejects unless the repository is private; `fresh` bypasses any cached confirmation (writes). */
+  privateOnly(options?: { fresh?: boolean }): Promise<void>;
   list(cursor: number): Promise<Page<Summary>>;
   search(query: string, cursor?: number): Promise<Page<SearchResult>>;
   get(id: string): Promise<Document>;
