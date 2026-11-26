@@ -1,14 +1,18 @@
-import { uuid, titleOf, searchTerms, type Document } from "@descartes/shared";
-import { fail, HttpError, type Repository } from "./repository.ts";
+import { titleOf, searchTerms, type Document } from "@descartes/shared";
+import { mapConcurrent, semaphore } from "./concurrency.ts";
+import { base64, decode, githubHttp, graphqlBlobs } from "./github-http.ts";
+import { Lru } from "./lru.ts";
+import { fail, type Repository } from "./repository.ts";
 import {
   INDEX_BATCH_BYTES,
   indexRow,
   SearchIndex,
   type SearchDatabase,
   type IndexBlob,
-  type IndexEntry,
   type IndexRow,
 } from "./search-index.ts";
+import { SingleFlight } from "./single-flight.ts";
+import { documentTree, type Entry } from "./tree.ts";
 export { fail, HttpError } from "./repository.ts";
 export interface Env {
   GITHUB_REPOSITORY: string;
@@ -18,15 +22,6 @@ export interface Env {
   ACCESS_AUD: string;
   SEARCH_DB?: SearchDatabase;
 }
-function base64(bytes: Uint8Array) {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 8192)
-    binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
-  return btoa(binary);
-}
-const decode = (str: string) =>
-  new TextDecoder().decode(Uint8Array.from(atob(str), (c) => c.charCodeAt(0)));
-const docPath = new RegExp("^docs/(" + uuid + ")\\.md$");
 /*
  * Workers Free allows 50 subrequests per request; D1 calls are counted conservatively as well.
  * Fixed cost per request: Access JWKS 1 + privacy 1 + tree 1 + D1 prune 1 + at most 3 other
@@ -46,7 +41,6 @@ const GRAPHQL_BLOB_BYTES = 256 * 1024;
 const PAGE_DOCS = 500;
 const PAGE_BYTES = 2 * 1024 * 1024;
 const CONCURRENCY = 6;
-const TREE_TTL = 15_000;
 const PRIVACY_TTL = 60_000;
 const PRUNE_INTERVAL = 10 * 60_000;
 const CONTENT_BUDGET = 8 * 1024 * 1024;
@@ -61,7 +55,6 @@ export type WarmReport = {
   oversized: number;
   remaining: number;
 };
-type Entry = IndexEntry & { size?: number };
 type Budget = { left: number };
 type Loaded = IndexBlob | IndexRow;
 export type GitHubRepository = Repository & {
@@ -69,33 +62,10 @@ export type GitHubRepository = Repository & {
   warm(blobBudget?: number): Promise<WarmReport>;
 };
 
-async function mapConcurrent<T, R>(items: T[], fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = [];
-  let next = 0;
-  let failure: unknown;
-  await Promise.all(
-    Array.from({ length: Math.min(CONCURRENCY, items.length) }, async () => {
-      while (next < items.length && failure === undefined) {
-        const index = next++;
-        try {
-          results[index] = await fn(items[index]);
-        } catch (error) {
-          failure = error;
-        }
-      }
-    }),
-  );
-  if (failure !== undefined) throw failure;
-  return results;
-}
-
 /** One adapter per repository/credential/branch, retained by the Worker (never a public HTTP cache). */
 export function github(env: Env, send: typeof fetch = fetch, now = Date.now): GitHubRepository {
-  const root = "https://api.github.com/repos/" + env.GITHUB_REPOSITORY;
-  const [owner, name] = env.GITHUB_REPOSITORY.split("/");
+  const { request, call } = githubHttp(env, send);
   const ref = encodeURIComponent(env.GITHUB_BRANCH || "main");
-  // Only the docs subtree is listed, so screenshots in assets/ can never make the tree truncate.
-  const docsTree = "/git/trees/" + encodeURIComponent((env.GITHUB_BRANCH || "main") + ":docs");
   const index = env.SEARCH_DB ? new SearchIndex(env.SEARCH_DB, env) : undefined;
   let indexRetryAt = 0;
   let prunedAt = -Infinity;
@@ -109,130 +79,46 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Gi
       return undefined;
     }
   }
-  const titles = new Map<string, string>();
-  const contents = new Map<string, string>();
+  const titles = new Lru<string, string>(4096);
+  // UTF-16 code units approximate the isolate memory held by each string.
+  const contents = new Lru<string, string>(1024, CONTENT_BUDGET, (markdown) => markdown.length * 2);
   // `undefined`: GraphQL returned no usable text, so the REST blob endpoint must be used.
-  const loading = new Map<string, Promise<string | undefined>>();
-  const restLoading = new Map<string, Promise<string>>();
+  const loading = new SingleFlight<string, string | undefined>();
+  const restLoading = new SingleFlight<string, string>();
   // Immutable SHAs that GraphQL cannot serve (binary, truncated or undecidable) go straight to REST.
   const restOnly = new Set<string>();
-  let activeBlobs = 0;
-  const blobWaiters: (() => void)[] = [];
-  async function withBlobSlot<T>(task: () => Promise<T>): Promise<T> {
-    if (activeBlobs >= CONCURRENCY) await new Promise<void>((resolve) => blobWaiters.push(resolve));
-    else activeBlobs++;
-    try {
-      return await task();
-    } finally {
-      const next = blobWaiters.shift();
-      if (next) next();
-      else activeBlobs--;
-    }
-  }
-  let contentBytes = 0;
-  let tree: { entries: Entry[]; etag?: string; expires: number } | undefined;
-  let treeLoading: { generation: number; promise: Promise<Entry[]> } | undefined;
-  let generation = 0;
-  let checkingPrivate: Promise<void> | undefined;
+  const blobSlot = semaphore(CONCURRENCY);
+  const each = <T, R>(items: T[], fn: (item: T) => Promise<R>) =>
+    mapConcurrent(CONCURRENCY, items, fn);
+  const tree = documentTree(call, env.GITHUB_BRANCH || "main", now, async (entries) => {
+    if (now() - prunedAt < PRUNE_INTERVAL) return;
+    prunedAt = now();
+    // A save racing this tree read may lose its fresh row; that only costs one re-fetch.
+    await indexed((database) => database.prune(entries));
+  });
+  const checkingPrivate = new SingleFlight<"repo", void>();
   // Only a confirmed private=true result is reused, and only by reads.
   let privateUntil = -Infinity;
   let writes: Promise<unknown> = Promise.resolve();
-  async function request(url: string, init?: RequestInit, raw = false) {
-    const res = await send(url, {
-      ...init,
-      redirect: "manual",
-      signal: init?.signal ?? AbortSignal.timeout(15_000),
-      headers: {
-        Authorization: "Bearer " + env.GITHUB_TOKEN,
-        Accept: raw ? "application/vnd.github.raw+json" : "application/vnd.github+json",
-        "User-Agent": "descartes",
-        "Content-Type": "application/json",
-        ...init?.headers,
-      },
-    });
-    if (res.status === 409 || (res.status === 422 && init?.method === "PUT"))
-      fail(409, "保存が競合しました。下書きをコピーして最新版を開いてください。");
-    if (res.status === 404) fail(404, "文書またはリポジトリが見つかりません。");
-    if (!res.ok && res.status !== 304) fail(502, "GitHub request failed (" + res.status + ").");
-    return res;
-  }
-  const call = (path: string, init?: RequestInit, raw = false) => request(root + path, init, raw);
-  async function graphqlBlobs(shas: string[]) {
-    const query = `query($owner: String!, $name: String!, ${shas
-      .map((_, i) => `$b${i}: GitObjectID!`)
-      .join(", ")}) { repository(owner: $owner, name: $name) { ${shas
-      .map((_, i) => `b${i}: object(oid: $b${i}) { ... on Blob { text isBinary isTruncated } }`)
-      .join(" ")} } }`;
-    const variables: Record<string, string> = { owner, name };
-    shas.forEach((sha, i) => (variables["b" + i] = sha));
-    const res = await request("https://api.github.com/graphql", {
-      method: "POST",
-      body: JSON.stringify({ query, variables }),
-    });
-    let data;
-    try {
-      data = await res.json();
-    } catch {
-      fail(502, "GitHub request failed.");
-    }
-    // Rate limits and permission problems arrive as 200 with `errors`; their text is never forwarded.
-    const repository = data?.errors?.length ? undefined : data?.data?.repository;
-    if (!repository) fail(502, "GitHub request failed.");
-    return shas.map((_, i) => {
-      const blob = repository["b" + i];
-      if (blob?.isBinary !== false || blob.isTruncated !== false || typeof blob.text !== "string")
-        return undefined;
-      // The REST path decodes with TextDecoder, which drops a UTF-8 BOM; keep both paths identical.
-      return (blob.text as string).replace(/^\uFEFF/, "");
-    });
-  }
-  function rememberTitle(sha: string, title: string) {
-    titles.delete(sha);
-    titles.set(sha, title);
-    if (titles.size > 4096) titles.delete(titles.keys().next().value!);
-  }
   function remember(sha: string, markdown: string) {
-    rememberTitle(sha, titleOf(markdown).slice(0, 512));
-    const bytes = markdown.length * 2;
-    if (bytes > CONTENT_BUDGET || contents.has(sha)) return;
-    while (contentBytes + bytes > CONTENT_BUDGET || contents.size >= 1024) {
-      const oldest = contents.keys().next().value!;
-      contentBytes -= contents.get(oldest)!.length * 2;
-      contents.delete(oldest);
-    }
-    contents.set(sha, markdown);
-    contentBytes += bytes;
+    titles.set(sha, titleOf(markdown).slice(0, 512));
+    if (!contents.has(sha)) contents.set(sha, markdown);
   }
   function cached(sha: string) {
     const markdown = contents.get(sha);
     if (markdown === undefined) return undefined;
     if (!titles.has(sha)) remember(sha, markdown);
-    contents.delete(sha);
-    contents.set(sha, markdown);
+    contents.touch(sha);
     return markdown;
   }
-  function settle<T>(map: Map<string, Promise<T>>, sha: string, promise: Promise<T>) {
-    map.set(sha, promise);
-    const done = () => {
-      if (map.get(sha) === promise) map.delete(sha);
-    };
-    promise.then(done, done);
-    return promise;
-  }
   function restBlob(sha: string) {
-    const running = restLoading.get(sha);
-    if (running) return running;
-    return settle(
-      restLoading,
-      sha,
-      (async () => {
-        const data = await withBlobSlot(async () => (await call("/git/blobs/" + sha)).json());
-        if (data.encoding && data.encoding !== "base64") fail(502, "Invalid GitHub blob encoding.");
-        const markdown = decode(data.content);
-        remember(sha, markdown);
-        return markdown;
-      })(),
-    );
+    return restLoading.run(sha, undefined, async () => {
+      const data = await blobSlot(async () => (await call("/git/blobs/" + sha)).json());
+      if (data.encoding && data.encoding !== "base64") fail(502, "Invalid GitHub blob encoding.");
+      const markdown = decode(data.content);
+      remember(sha, markdown);
+      return markdown;
+    });
   }
   /**
    * Reads the bodies of the entries from `start` on that `needs` selects, and ends the page where
@@ -261,7 +147,7 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Gi
       if (planned.length === PAGE_DOCS || (planned.length && pageBytes + size > PAGE_BYTES)) break;
       const markdown = contents.get(sha);
       const running =
-        markdown === undefined ? (loading.get(sha) ?? restLoading.get(sha)) : undefined;
+        markdown === undefined ? (loading.peek(sha) ?? restLoading.peek(sha)) : undefined;
       const rest =
         !running && markdown === undefined && (restOnly.has(sha) || size > GRAPHQL_BLOB_BYTES);
       const batch =
@@ -299,23 +185,24 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Gi
     }
     if (!planned.length) return { end, bodies: [] };
     for (const shas of batches) {
-      const read = withBlobSlot(() => graphqlBlobs(shas));
-      shas.forEach((sha, i) =>
-        settle(
-          loading,
-          sha,
-          read.then((texts) => {
-            const text = texts[i];
-            if (text === undefined) {
-              restOnly.add(sha);
-              if (restOnly.size > 4096) restOnly.delete(restOnly.values().next().value!);
-            } else remember(sha, text);
-            return text;
-          }),
-        ),
-      );
+      const read = blobSlot(() => graphqlBlobs(request, env.GITHUB_REPOSITORY, shas));
+      shas.forEach((sha, i) => {
+        // Callers observe the shared promise through peek(); this handle only keeps it registered.
+        loading
+          .run(sha, undefined, () =>
+            read.then((texts) => {
+              const text = texts[i];
+              if (text === undefined) {
+                restOnly.add(sha);
+                if (restOnly.size > 4096) restOnly.delete(restOnly.values().next().value!);
+              } else remember(sha, text);
+              return text;
+            }),
+          )
+          .catch(() => {});
+      });
     }
-    for (const item of planned) item.body ??= loading.get(item.sha);
+    for (const item of planned) item.body ??= loading.peek(item.sha);
     budget.left -= spent;
     const texts = await Promise.all(planned.map((item) => item.body));
     // Now that bodies and fallbacks are known, accept the longest prefix whose exact cost fits.
@@ -369,7 +256,7 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Gi
       database.titles(entries.slice(cursor).map((entry) => entry.sha)),
     );
     if (!known) return undefined;
-    for (const [sha, title] of known) rememberTitle(sha, title);
+    for (const [sha, title] of known) titles.set(sha, title);
     const page = await readPage(entries, cursor, (sha) => !known.has(sha), true, budget);
     if (
       page.bodies.length &&
@@ -382,62 +269,7 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Gi
   async function blob(sha: string) {
     const markdown = cached(sha);
     if (markdown !== undefined) return markdown;
-    return (await loading.get(sha)) ?? restBlob(sha);
-  }
-  async function snapshot(): Promise<Entry[]> {
-    if (tree && tree.expires > now()) return tree.entries;
-    if (treeLoading?.generation === generation) return treeLoading.promise;
-    const version = generation;
-    const previous = tree;
-    const promise = (async () => {
-      let response: Response | undefined;
-      try {
-        response = await call(docsTree, {
-          headers: previous?.etag ? { "If-None-Match": previous.etag } : {},
-        });
-      } catch (error) {
-        if (!(error instanceof HttpError) || error.status !== 404) throw error;
-        // A missing branch and a branch without docs/ both 404; only the latter is an empty notebook.
-        await call("/git/trees/" + ref);
-      }
-      let entries: Entry[];
-      if (response?.status === 304 && previous) entries = previous.entries;
-      else {
-        const data = response ? await response.json() : { tree: [] };
-        if (data.truncated) fail(503, "Repository tree is too large.");
-        entries = [];
-        for (const f of data.tree as { path: string; sha: string; type: string; size?: number }[]) {
-          const id = f.type === "blob" && docPath.exec("docs/" + f.path)?.[1];
-          if (id) entries.push({ id, sha: f.sha, size: f.size });
-        }
-        entries.sort((a, b) => a.id.localeCompare(b.id));
-        if (version === generation && now() - prunedAt >= PRUNE_INTERVAL) {
-          prunedAt = now();
-          // A save racing this tree read may lose its fresh row; that only costs one re-fetch.
-          await indexed((database) => database.prune(entries));
-        }
-      }
-      if (version === generation) {
-        tree = {
-          entries,
-          etag:
-            response?.headers.get("ETag") ??
-            (response?.status === 304 ? previous?.etag : undefined),
-          expires: now() + TREE_TTL,
-        };
-      }
-      return entries;
-    })();
-    treeLoading = { generation: version, promise };
-    try {
-      return await promise;
-    } finally {
-      if (treeLoading?.promise === promise) treeLoading = undefined;
-    }
-  }
-  function invalidate() {
-    generation++;
-    tree = undefined;
+    return (await loading.peek(sha)) ?? restBlob(sha);
   }
   function write(path: string, bytes: Uint8Array, sha?: string): Promise<string> {
     // Contents API writes to the same branch must be serialized, even for different files.
@@ -454,7 +286,7 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Gi
         });
         return (await r.json()).content.sha as string;
       } finally {
-        invalidate();
+        tree.invalidate();
       }
     });
     writes = result.catch(() => {});
@@ -463,22 +295,16 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Gi
   async function privateOnly({ fresh = false } = {}) {
     // A short success-only window removes a GitHub round trip from most reads; writes never use it.
     if (!fresh && now() < privateUntil) return;
-    if (!checkingPrivate)
-      checkingPrivate = (async () => {
-        try {
-          if ((await (await call("")).json()).private !== true)
-            fail(403, "A private document repository is required.");
-          privateUntil = now() + PRIVACY_TTL;
-        } catch (error) {
-          privateUntil = -Infinity;
-          throw error;
-        }
-      })();
-    try {
-      await checkingPrivate;
-    } finally {
-      checkingPrivate = undefined;
-    }
+    await checkingPrivate.run("repo", undefined, async () => {
+      try {
+        if ((await (await call("")).json()).private !== true)
+          fail(403, "A private document repository is required.");
+        privateUntil = now() + PRIVACY_TTL;
+      } catch (error) {
+        privateUntil = -Infinity;
+        throw error;
+      }
+    });
   }
   return {
     privateOnly,
@@ -493,7 +319,7 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Gi
       if (!index) return report;
       await privateOnly();
       const prunedBefore = prunedAt;
-      const entries = await snapshot();
+      const entries = await tree.read();
       report.documents = entries.length;
       // The tree read may already have pruned; otherwise prune here so every run bounds the table.
       if (prunedAt === prunedBefore) {
@@ -502,12 +328,12 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Gi
       }
       const known = await indexed((database) => database.titles(entries.map((e) => e.sha)));
       if (!known) return { ...report, remaining: entries.length };
-      for (const [sha, title] of known) rememberTitle(sha, title);
+      for (const [sha, title] of known) titles.set(sha, title);
       const missing = [...new Set(entries.map((e) => e.sha).filter((sha) => !known.has(sha)))];
       const batch = missing.slice(0, Math.max(0, blobBudget));
       report.remaining = missing.length - batch.length;
       for (let i = 0; i < batch.length; i += WARM_CHUNK) {
-        const loaded = await mapConcurrent(batch.slice(i, i + WARM_CHUNK), async (sha) => {
+        const loaded = await each(batch.slice(i, i + WARM_CHUNK), async (sha) => {
           try {
             return { sha, markdown: await blob(sha) };
           } catch {
@@ -527,7 +353,7 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Gi
       return report;
     },
     async list(cursor) {
-      const docs = await snapshot();
+      const docs = await tree.read();
       const known = new Map<string, string>();
       for (const entry of docs.slice(cursor)) {
         const title = titles.get(entry.sha);
@@ -536,7 +362,7 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Gi
       const unknown = docs.slice(cursor).filter((entry) => !known.has(entry.sha));
       const stored = await indexed((database) => database.titles(unknown.map((e) => e.sha)));
       for (const [sha, title] of stored ?? []) {
-        rememberTitle(sha, title);
+        titles.set(sha, title);
         known.set(sha, title);
       }
       // Known titles cost no GitHub request, so a page ends only at the read budget.
@@ -561,7 +387,7 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Gi
       // subrequests to be a useful fallback, so an outage is reported rather than hidden.
       const unavailable: () => never = () => fail(503, "検索インデックスを利用できません。");
       if (!indexUsable()) unavailable();
-      const entries = await snapshot();
+      const entries = await tree.read();
       const ready = await indexed((database) => database.searchComplete(entries, query));
       if (ready) return { items: ready, next: null };
       if (ready === undefined) unavailable();
@@ -580,7 +406,7 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Gi
     },
     async get(id): Promise<Document> {
       // The tree SHA may be up to TREE_TTL old; saves stay safe because GitHub rejects stale SHAs.
-      const entry = (await snapshot()).find((e) => e.id === id);
+      const entry = (await tree.read()).find((e) => e.id === id);
       if (entry) {
         const { sha } = entry;
         let markdown = contents.has(sha)
