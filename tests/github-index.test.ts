@@ -282,3 +282,84 @@ test("a changed tree prunes versions that are no longer current, at most every t
     db.close();
   }
 });
+
+test("cron warming indexes every document within the subrequest budget, then fetches no blobs", async () => {
+  const db = new SqliteD1();
+  try {
+    const f = fixture(db, 65);
+    const github = () => f.counts.metadata + f.counts.tree + f.counts.blobs;
+    const runs = [];
+    for (let run = 0; run < 3; run++) {
+      const before = github();
+      const blobs = f.counts.blobs;
+      // Each cron invocation is a cold adapter; Workers Free allows 50 external subrequests.
+      runs.push({ ...(await f.fresh().warm()), blobs: f.counts.blobs - blobs });
+      assert.ok(github() - before <= 50);
+    }
+    assert.deepEqual(runs[0], {
+      documents: 65,
+      indexed: 40,
+      failed: 0,
+      oversized: 0,
+      remaining: 25,
+      blobs: 40,
+    });
+    assert.deepEqual(runs[1], {
+      documents: 65,
+      indexed: 25,
+      failed: 0,
+      oversized: 0,
+      remaining: 0,
+      blobs: 25,
+    });
+    assert.deepEqual(runs[2], {
+      documents: 65,
+      indexed: 0,
+      failed: 0,
+      oversized: 0,
+      remaining: 0,
+      blobs: 0,
+    });
+    // A cold request after warming searches and lists from D1 without any blob reads.
+    const blobs = f.counts.blobs;
+    assert.equal((await apiFor(f.fresh()).search("needle")).items.length, 50);
+    assert.equal((await f.fresh().list(0)).next, null);
+    assert.equal(f.counts.blobs, blobs);
+    // An external edit costs exactly one blob on the next run, and the old version is pruned.
+    f.external(idOf(3), "# Edited\nfresh");
+    assert.equal((await f.fresh().warm()).indexed, 1);
+    assert.equal(f.counts.blobs, blobs + 1);
+    assert.equal(db.sqlite.prepare("SELECT count(*) AS count FROM search_blobs").get()!.count, 65);
+    assert.equal((await apiFor(f.fresh()).search("fresh")).items[0].title, "Edited");
+  } finally {
+    db.close();
+  }
+});
+
+test("an oversized document is skipped without stalling the warm batch it belongs to", async () => {
+  const db = new SqliteD1();
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const f = fixture(db, 20);
+    // Exceeds the 2 MB row budget once the normalized search text is counted too.
+    f.docs.set(idOf(1), { sha: shaOf(2), markdown: "# Huge secret\n" + "x".repeat(1_100_000) });
+    const first = await f.fresh().warm(8);
+    assert.deepEqual(first, { documents: 20, indexed: 7, failed: 0, oversized: 1, remaining: 12 });
+    const indexed = () =>
+      db.sqlite.prepare("SELECT count(*) AS count FROM search_blobs").get()!.count;
+    assert.equal(indexed(), 7);
+    // The next run makes progress past the batch that held the oversized document.
+    const second = await f.fresh().warm(8);
+    assert.deepEqual(second, { documents: 20, indexed: 7, failed: 0, oversized: 1, remaining: 5 });
+    assert.equal(indexed(), 14);
+    const third = await f.fresh().warm(8);
+    assert.deepEqual(third, { documents: 20, indexed: 5, failed: 0, oversized: 1, remaining: 0 });
+    assert.equal(indexed(), 19);
+    // The index stayed available, and only counts were logged.
+    assert.doesNotMatch(JSON.stringify(warning.mock.calls), /search_index_unavailable|Huge|secret/);
+    assert.equal(warning.mock.calls.length, 3);
+  } finally {
+    warning.mockRestore();
+    db.close();
+  }
+});
