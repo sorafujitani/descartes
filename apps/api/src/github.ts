@@ -32,6 +32,7 @@ const docPath = new RegExp("^docs/(" + uuid + ")\\.md$");
 const PAGE_SIZE = 32;
 const CONCURRENCY = 6;
 const TREE_TTL = 15_000;
+const PRIVACY_TTL = 60_000;
 const PRUNE_INTERVAL = 10 * 60_000;
 const CONTENT_BUDGET = 8 * 1024 * 1024;
 
@@ -99,6 +100,8 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Re
   let treeLoading: { generation: number; promise: Promise<Entry[]> } | undefined;
   let generation = 0;
   let checkingPrivate: Promise<void> | undefined;
+  // Only a confirmed private=true result is reused, and only by reads.
+  let privateUntil = -Infinity;
   let writes: Promise<unknown> = Promise.resolve();
   async function call(path: string, init?: RequestInit, raw = false) {
     const res = await send(root + path, {
@@ -253,12 +256,19 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Re
     return result;
   }
   return {
-    async privateOnly() {
-      // Coalesce concurrent checks, but do not cache the privacy decision between requests.
+    async privateOnly({ fresh = false } = {}) {
+      // A short success-only window removes a GitHub round trip from most reads; writes never use it.
+      if (!fresh && now() < privateUntil) return;
       if (!checkingPrivate)
         checkingPrivate = (async () => {
-          if ((await (await call("")).json()).private !== true)
-            fail(403, "A private document repository is required.");
+          try {
+            if ((await (await call("")).json()).private !== true)
+              fail(403, "A private document repository is required.");
+            privateUntil = now() + PRIVACY_TTL;
+          } catch (error) {
+            privateUntil = -Infinity;
+            throw error;
+          }
         })();
       try {
         await checkingPrivate;
