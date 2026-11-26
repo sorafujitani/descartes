@@ -55,6 +55,12 @@ export function client(
   send: typeof fetch = fetch,
 ) {
   async function request<T>(path: string, init?: RequestInit): Promise<T> {
+    return (await exchange<T>(path, init)).data;
+  }
+  async function exchange<T>(
+    path: string,
+    init?: RequestInit,
+  ): Promise<{ data: T; res: Response }> {
     const requestHeaders = new Headers(headers);
     new Headers(init?.headers).forEach((value, key) => requestHeaders.set(key, value));
     const res = await send(origin + "/api/" + path, {
@@ -62,6 +68,10 @@ export function client(
       redirect: "error",
       headers: requestHeaders,
     });
+    if (res.status === 304) {
+      init?.signal?.throwIfAborted();
+      return { data: undefined as T, res };
+    }
     const data = await res.json().catch(() => null);
     init?.signal?.throwIfAborted();
     if (!res.ok || !data)
@@ -69,16 +79,24 @@ export function client(
         res.status,
         data?.error || "Request failed (" + res.status + "). Check your Access session.",
       );
-    return data;
+    return { data, res };
   }
-  async function* readPages<T>(path: string, signal?: AbortSignal): AsyncGenerator<T[]> {
+  async function* readPages<T>(
+    path: string,
+    signal?: AbortSignal,
+    seen?: { etag?: string },
+  ): AsyncGenerator<T[]> {
     let cursor = 0;
     while (true) {
       signal?.throwIfAborted();
-      const page = await request<Page<T>>(
+      const ask = cursor === 0 && seen?.etag ? { "If-None-Match": seen.etag } : undefined;
+      const { data: page, res } = await exchange<Page<T>>(
         path + (path.includes("?") ? "&" : "?") + "cursor=" + cursor,
-        { signal },
+        { signal, headers: ask },
       );
+      if (seen) seen.etag = cursor === 0 ? (res.headers.get("ETag") ?? undefined) : undefined;
+      // 304: the caller's list is still current.
+      if (res.status === 304 && ask) return;
       if (
         !Array.isArray(page.items) ||
         (page.next !== null && (!Number.isSafeInteger(page.next) || page.next <= cursor))
@@ -89,7 +107,12 @@ export function client(
       cursor = page.next;
     }
   }
-  const pages = (signal?: AbortSignal) => readPages<Summary>("docs", signal);
+  /**
+   * Title pages. Pass `seen` with the ETag of a previously complete list: an unchanged list yields
+   * nothing and keeps the ETag; otherwise `seen.etag` becomes the new list's validator (if any).
+   */
+  const pages = (signal?: AbortSignal, seen?: { etag?: string }) =>
+    readPages<Summary>("docs", signal, seen);
   return {
     pages,
     async list(signal?: AbortSignal): Promise<Summary[]> {

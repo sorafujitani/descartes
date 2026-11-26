@@ -457,3 +457,58 @@ test("hiding the page saves immediately with a keepalive request", async () => {
   assert.equal(writes[0].request.keepalive, true);
   assert.equal(writes[0].body.markdown, "# Draft\nbackground");
 });
+
+test("the last title list is shown at once and an unchanged list is revalidated with its ETag", async () => {
+  localStorage.setItem(
+    "noteList",
+    JSON.stringify({ etag: '"v1"', docs: [{ id: saved.id, title: "Cached title" }] }),
+  );
+  const list = deferred<Response>();
+  const conditions: (string | null)[] = [];
+  const api = client("https://app.test", {}, async (url, init) => {
+    if (!String(url).includes("?cursor=")) return Response.json(saved);
+    conditions.push(new Headers(init?.headers).get("If-None-Match"));
+    return list.promise;
+  });
+  await mount(createElement(App, { api, initialId: null }));
+  await act(async () => {
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", metaKey: true, bubbles: true }));
+  });
+  assert.match(host.querySelector(".palette-list")!.textContent!, /Cached title/);
+  assert.deepEqual(conditions, ['"v1"']);
+  await act(async () => {
+    list.resolve(new Response(null, { status: 304, headers: { ETag: '"v1"' } }));
+  });
+  assert.match(host.querySelector(".palette-list")!.textContent!, /Cached title/);
+  assert.equal(JSON.parse(localStorage.getItem("noteList")!).etag, '"v1"');
+});
+
+test("the highlighted note is read before it is chosen and opens without another request", async () => {
+  fakeTimers();
+  const other: Document = {
+    ...saved,
+    id: "00000000-0000-0000-0000-000000000002",
+    title: "Other",
+    markdown: "# Other",
+  };
+  const reads: string[] = [];
+  const api = client("https://app.test", {}, async (url) => {
+    const path = new URL(String(url)).pathname;
+    if (path === "/api/docs")
+      return Response.json({ items: [{ id: other.id, title: other.title }], next: null });
+    reads.push(path);
+    return Response.json(other);
+  });
+  await mount(createElement(App, { api, initialId: null }));
+  await act(async () => {
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "p", metaKey: true, bubbles: true }));
+  });
+  await advance(150);
+  assert.deepEqual(reads, ["/api/docs/" + other.id]);
+  await act(async () => {
+    host.querySelector<HTMLButtonElement>('.palette-list button[data-index="0"]')!.click();
+  });
+  await advance(0);
+  assert.equal(editor().state.doc.toString(), other.markdown);
+  assert.equal(reads.length, 1);
+});

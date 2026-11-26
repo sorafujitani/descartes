@@ -8,7 +8,8 @@ export interface SearchStatement {
 }
 export interface SearchDatabase {
   prepare(sql: string): SearchStatement;
-  batch(statements: SearchStatement[]): Promise<unknown[]>;
+  /** One round trip; like D1, each result carries the rows of its statement. */
+  batch(statements: SearchStatement[]): Promise<{ results?: unknown[] }[]>;
 }
 export type IndexEntry = { id: string; sha: string };
 export type IndexBlob = { sha: string; markdown: string };
@@ -49,14 +50,24 @@ export class SearchIndex {
       .all<{ sha: string; title: string }>();
     return new Map(results.map(({ sha, title }) => [sha, title]));
   }
-  async contains(entries: IndexEntry[]) {
-    if (!entries.length) return true;
-    const { results } = await this.db
+  private async containsStatement(entries: IndexEntry[]) {
+    return this.db
       .prepare(`SELECT count(*) AS count FROM json_each(?) e
       JOIN search_blobs b ON b.scope = ? AND b.sha = ${entrySha}`)
-      .bind(entriesJson(entries), await this.scope)
-      .all<{ count: number }>();
+      .bind(entriesJson(entries), await this.scope);
+  }
+  async contains(entries: IndexEntry[]) {
+    if (!entries.length) return true;
+    const { results } = await (await this.containsStatement(entries)).all<{ count: number }>();
     return results[0].count === entries.length;
+  }
+  /** Deletes versions that are no longer in the tree, so the table and FTS index stop growing. */
+  async prune(entries: IndexEntry[]) {
+    await this.db
+      .prepare(`DELETE FROM search_blobs WHERE scope = ?
+      AND sha NOT IN (SELECT ${entrySha} FROM json_each(?) e)`)
+      .bind(await this.scope, entriesJson(entries))
+      .run();
   }
   async put(blobs: IndexBlob[]) {
     const scope = await this.scope;
@@ -86,9 +97,7 @@ export class SearchIndex {
     }
     if (batch.length) await this.db.batch(batch);
   }
-  async search(entries: IndexEntry[], query: string): Promise<SearchResult[]> {
-    const terms = searchTerms(query);
-    if (!entries.length || !terms.length) return [];
+  private async searchStatement(entries: IndexEntry[], terms: string[]) {
     const titleMatches = `NOT EXISTS (SELECT 1 FROM json_each(?) t WHERE instr(${heading}, t.value) = 0)`;
     const matches = `NOT EXISTS (SELECT 1 FROM json_each(?) t WHERE instr(b.search_text, t.value) = 0 AND instr(${heading}, t.value) = 0)`;
     const long = terms.filter((term) => [...term].length >= 3 && !term.includes("\0"));
@@ -108,10 +117,27 @@ export class SearchIndex {
     ];
     if (long.length)
       params.push(long.map((term) => '"' + term.replaceAll('"', '""') + '"').join(" AND "));
-    const { results } = await this.db
-      .prepare(sql)
-      .bind(...params)
-      .all<SearchResult>();
+    return this.db.prepare(sql).bind(...params);
+  }
+  async search(entries: IndexEntry[], query: string): Promise<SearchResult[]> {
+    const terms = searchTerms(query);
+    if (!entries.length || !terms.length) return [];
+    const { results } = await (await this.searchStatement(entries, terms)).all<SearchResult>();
     return results;
+  }
+  /**
+   * Checks completeness and searches in one D1 round trip. Returns `null` while some current
+   * document is not indexed yet, because partial results would silently miss matches.
+   */
+  async searchComplete(entries: IndexEntry[], query: string): Promise<SearchResult[] | null> {
+    const terms = searchTerms(query);
+    if (!entries.length || !terms.length) return [];
+    const [count, found] = await this.db.batch([
+      await this.containsStatement(entries),
+      await this.searchStatement(entries, terms),
+    ]);
+    if ((count.results?.[0] as { count: number } | undefined)?.count !== entries.length)
+      return null;
+    return (found.results ?? []) as SearchResult[];
   }
 }

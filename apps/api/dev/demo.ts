@@ -15,11 +15,9 @@ export function memoryStore(): Repository {
   return {
     async privateOnly() {},
     async list(cursor) {
+      // Like the GitHub adapter with known titles: the whole list in one page.
       const items = Array.from(docs.values(), ({ id, title }) => ({ id, title }));
-      return {
-        items: items.slice(cursor, cursor + 8),
-        next: cursor + 8 < items.length ? cursor + 8 : null,
-      };
+      return { items: items.slice(cursor), next: null };
     },
     async search(query, cursor = 0) {
       const terms = searchTerms(query);

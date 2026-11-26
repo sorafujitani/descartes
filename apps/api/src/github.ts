@@ -32,6 +32,7 @@ const docPath = new RegExp("^docs/(" + uuid + ")\\.md$");
 const PAGE_SIZE = 32;
 const CONCURRENCY = 6;
 const TREE_TTL = 15_000;
+const PRUNE_INTERVAL = 10 * 60_000;
 const CONTENT_BUDGET = 8 * 1024 * 1024;
 type Entry = { path: string; sha: string; type: string };
 
@@ -63,6 +64,7 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Re
   // Worst case: one GitHub read and one D1 write per large document, plus auth/metadata/query overhead.
   const pageSize = index ? 16 : PAGE_SIZE;
   let indexRetryAt = 0;
+  let prunedAt = -Infinity;
   async function indexed<T>(operation: (index: SearchIndex) => Promise<T>): Promise<T | undefined> {
     if (!index || now() < indexRetryAt) return undefined;
     try {
@@ -189,6 +191,11 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Re
         if (data.truncated) fail(503, "Repository tree is too large.");
         entries = (data.tree as Entry[]).filter((f) => f.type === "blob" && docPath.test(f.path));
         entries.sort((a, b) => a.path.localeCompare(b.path));
+        if (version === generation && now() - prunedAt >= PRUNE_INTERVAL) {
+          prunedAt = now();
+          // A save racing this tree read may lose its fresh row; that only costs one re-fetch.
+          await indexed((database) => database.prune(entriesOf(entries)));
+        }
       }
       if (version === generation) {
         if (tree?.entries !== entries) searchCache.clear();
@@ -250,14 +257,37 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Re
     },
     async list(cursor) {
       const docs = await snapshot();
-      const page = docs.slice(cursor, cursor + pageSize);
-      await hydrate(page);
-      const items = await mapConcurrent(page, async (f) => {
+      const known = new Map<string, string>();
+      for (const entry of docs.slice(cursor)) {
+        const title = titles.get(entry.sha);
+        if (title !== undefined) known.set(entry.sha, title);
+      }
+      const unknown = docs.slice(cursor).filter((entry) => !known.has(entry.sha));
+      const stored = await indexed((database) => database.titles(unknown.map((e) => e.sha)));
+      for (const [sha, title] of stored ?? []) {
+        rememberTitle(sha, title);
+        known.set(sha, title);
+      }
+      // Known titles cost no GitHub request, so a page ends only at the blob-read budget.
+      const missing = new Set<string>();
+      let end = cursor;
+      for (; end < docs.length; end++) {
+        const sha = docs[end].sha;
+        if (known.has(sha) || missing.has(sha)) continue;
+        if (missing.size === pageSize) break;
+        missing.add(sha);
+      }
+      const loaded = await mapConcurrent([...missing], async (sha) => ({
+        sha,
+        markdown: await blob(sha),
+      }));
+      for (const { sha, markdown } of loaded) known.set(sha, titleOf(markdown).slice(0, 512));
+      await indexed((database) => database.put(loaded));
+      const items = docs.slice(cursor, end).map((f) => {
         const id = f.path.slice(5, -3);
-        if (!titles.has(f.sha)) await blob(f.sha);
-        return { id, title: titles.get(f.sha) || id };
+        return { id, title: known.get(f.sha) || id };
       });
-      return { items, next: cursor + page.length < docs.length ? cursor + page.length : null };
+      return { items, next: end < docs.length ? end : null };
     },
     async search(query, cursor = 0) {
       const terms = searchTerms(query);
@@ -266,23 +296,16 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Re
       const page = entries.slice(cursor, cursor + pageSize);
       if (index && now() >= indexRetryAt) {
         const full = entriesOf(entries);
-        const ready = await indexed((database) => database.contains(full));
-        if (ready) {
-          const items = await indexed((database) => database.search(full, query));
-          if (items) return { items, next: null };
-        } else if (ready === false && (await hydrate(page))) {
-          const complete =
-            cursor + page.length >= entries.length &&
-            (await indexed((database) => database.contains(full)));
-          const items = await indexed((database) =>
-            database.search(complete ? full : entriesOf(page), query),
-          );
-          if (items)
-            return {
-              items,
-              next:
-                complete || cursor + page.length >= entries.length ? null : cursor + page.length,
-            };
+        const ready = await indexed((database) => database.searchComplete(full, query));
+        if (ready) return { items: ready, next: null };
+        if (ready === null && (await hydrate(page))) {
+          const last = cursor + page.length >= entries.length;
+          const complete = last
+            ? await indexed((database) => database.searchComplete(full, query))
+            : null;
+          if (complete) return { items: complete, next: null };
+          const items = await indexed((database) => database.search(entriesOf(page), query));
+          if (items) return { items, next: last ? null : cursor + page.length };
         }
       }
       const key = JSON.stringify([terms, cursor]);

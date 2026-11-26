@@ -209,6 +209,11 @@ dialog kbd,
 .palette-list ul {
   margin: 0;
 }
+/* Long lists lay out only the rows near the visible part. */
+.palette-list li li {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 2.5rem;
+}
 .palette-list button {
   display: block;
   width: 100%;

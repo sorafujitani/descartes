@@ -116,7 +116,10 @@ test("32-item pages share one tree and immutable blobs, with bounded concurrency
   assert.equal(f.calls.tree, 1);
   assert.equal(f.calls.blob, 130);
   assert.ok(f.maxActive() <= 6);
-  await f.store.list(0);
+  // Every title is now known, so the whole list is a single page without GitHub reads.
+  const warm = await f.store.list(0);
+  assert.equal(warm.items.length, 130);
+  assert.equal(warm.next, null);
   assert.equal(f.calls.blob, 130);
   f.advance();
   await f.store.list(0);

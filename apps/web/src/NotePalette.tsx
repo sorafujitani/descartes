@@ -1,5 +1,6 @@
 import {
   memo,
+  useCallback,
   useDeferredValue,
   useEffect,
   useLayoutEffect,
@@ -38,6 +39,38 @@ export function rememberNote(id: string) {
 }
 
 type Row = Summary & { snippet?: string };
+/** Rows re-render only when their own state changes, not on every highlight move. */
+const PaletteRow = memo(function PaletteRow({
+  doc,
+  index,
+  active,
+  current,
+  onHover,
+  onChoose,
+}: {
+  doc: Row;
+  index: number;
+  active: boolean;
+  current: boolean;
+  onHover: (index: number) => void;
+  onChoose: (id: string) => void;
+}) {
+  return (
+    <li>
+      <button
+        type="button"
+        data-index={index}
+        className={active ? "active" : undefined}
+        aria-current={current ? "page" : undefined}
+        onMouseMove={() => onHover(index)}
+        onClick={() => onChoose(doc.id)}
+      >
+        <span className="palette-title">{doc.title || "無題"}</span>
+        {doc.snippet && <small className="search-snippet">{doc.snippet}</small>}
+      </button>
+    </li>
+  );
+});
 type Props = {
   api: ReturnType<typeof client>;
   docs: Summary[];
@@ -48,6 +81,8 @@ type Props = {
   revision?: number;
   onClose: () => void;
   onSelect: (id?: string) => void;
+  /** The highlighted note, so it can be read before it is chosen. */
+  onPreview?: (id: string) => void;
 };
 /**
  * The note switcher (⌘P): a search field over the notes, recently opened ones first, with an
@@ -63,6 +98,7 @@ export const NotePalette = memo(function NotePalette({
   revision = 0,
   onClose,
   onSelect,
+  onPreview,
 }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
   const field = useRef<HTMLInputElement>(null);
@@ -109,6 +145,8 @@ export const NotePalette = memo(function NotePalette({
     [docs],
   );
   const sections = useMemo((): { label: string; rows: Row[] }[] => {
+    // A closed switcher keeps no rows, so list updates and typing in the note stay cheap.
+    if (!open) return [];
     if (fullText && deferred.trim()) return [{ label: "", rows: matches }];
     const terms = searchTerms(deferred);
     const found = indexed
@@ -122,8 +160,15 @@ export const NotePalette = memo(function NotePalette({
       { label: "最近", rows: recents },
       { label: "すべてのノート", rows: rest },
     ].filter((section) => section.rows.length);
-  }, [indexed, deferred, fullText, matches, recent]);
-  const rows = sections.flatMap((section) => section.rows);
+  }, [open, indexed, deferred, fullText, matches, recent]);
+  const rows = useMemo(() => sections.flatMap((section) => section.rows), [sections]);
+  const highlighted = rows[active]?.id;
+  useEffect(() => {
+    if (!open || !highlighted || !onPreview) return;
+    // Wait until the highlight settles, so arrowing through the list reads only where it stops.
+    const timer = setTimeout(() => onPreview(highlighted), 150);
+    return () => clearTimeout(timer);
+  }, [open, highlighted, onPreview]);
   useEffect(() => setActive(0), [deferred, fullText]);
   useEffect(() => {
     list.current?.querySelector(`[data-index="${active}"]`)?.scrollIntoView?.({ block: "nearest" });
@@ -154,10 +199,13 @@ export const NotePalette = memo(function NotePalette({
       controller.abort();
     };
   }, [api, query, fullText, revision]);
-  const choose = (id?: string) => {
-    onSelect(id);
-    onClose();
-  };
+  const choose = useCallback(
+    (id?: string) => {
+      onSelect(id);
+      onClose();
+    },
+    [onSelect, onClose],
+  );
   let index = -1;
   return (
     <dialog
@@ -210,21 +258,16 @@ export const NotePalette = memo(function NotePalette({
             <ul>
               {section.rows.map((doc) => {
                 index++;
-                const at = index;
                 return (
-                  <li key={doc.id}>
-                    <button
-                      type="button"
-                      data-index={at}
-                      className={at === active ? "active" : undefined}
-                      aria-current={currentId === doc.id ? "page" : undefined}
-                      onMouseMove={() => setActive(at)}
-                      onClick={() => choose(doc.id)}
-                    >
-                      <span className="palette-title">{doc.title || "無題"}</span>
-                      {doc.snippet && <small className="search-snippet">{doc.snippet}</small>}
-                    </button>
-                  </li>
+                  <PaletteRow
+                    key={doc.id}
+                    doc={doc}
+                    index={index}
+                    active={index === active}
+                    current={currentId === doc.id}
+                    onHover={setActive}
+                    onChoose={choose}
+                  />
                 );
               })}
             </ul>
