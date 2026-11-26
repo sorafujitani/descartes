@@ -1,4 +1,4 @@
-import { bindings, defineConfig, triggers } from "cf/config";
+import { bindings, defineConfig, exports, triggers } from "cf/config";
 import * as entrypoint from "../api/src/index.ts" with { type: "cf-worker" };
 import * as demo from "../api/dev/demo.ts" with { type: "cf-worker" };
 export default defineConfig(({ mode }) => ({
@@ -15,6 +15,9 @@ export default defineConfig(({ mode }) => ({
       redactQueryString: true,
       logs: { invocationLogs: false },
     },
+    // The demo entrypoint exports no Notebook class and keeps its store in memory.
+    exports:
+      mode === "demo" ? undefined : { Notebook: exports.durableObject({ storage: "sqlite" }) },
     assets: { notFoundHandling: "single-page-application", runWorkerFirst: ["/api/*"] },
     env:
       mode === "demo"
@@ -26,6 +29,7 @@ export default defineConfig(({ mode }) => ({
             ACCESS_ISSUER: bindings.secret(),
             ACCESS_AUD: bindings.secret(),
             SEARCH_DB: bindings.d1({ name: "descartes-search" }),
+            NOTEBOOK: bindings.durableObject({ worker: "descartes", exportName: "Notebook" }),
           },
   },
 }));

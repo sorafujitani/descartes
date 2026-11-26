@@ -1,25 +1,17 @@
 import { authorize } from "./auth.ts";
-import { github, HttpError, type Env, type GitHubRepository } from "./github.ts";
+import { HttpError, type Env } from "./github.ts";
+import { notebookFor, type WorkerEnv } from "./notebook.ts";
 import { fail } from "./repository.ts";
 import { createApi } from "./routes.ts";
+export { Notebook } from "./notebook.ts";
 
-const repositories = new Map<string, GitHubRepository>();
-function repositoryFor(env: Env) {
-  if (!env.GITHUB_TOKEN || !/^[-\w.]+\/[-\w.]+$/.test(env.GITHUB_REPOSITORY)) return undefined;
-  // Credentials are part of the scope: token rotation never reuses an old adapter.
-  const key = JSON.stringify([env.GITHUB_REPOSITORY, env.GITHUB_BRANCH, env.GITHUB_TOKEN]);
-  let store = repositories.get(key);
-  if (!store) {
-    if (repositories.size >= 4) repositories.delete(repositories.keys().next().value!);
-    store = github(env);
-    repositories.set(key, store);
-  }
-  return store;
-}
-const app = createApi<Env>(
+const configured = (env: Env) =>
+  !!env.GITHUB_TOKEN && /^[-\w.]+\/[-\w.]+$/.test(env.GITHUB_REPOSITORY);
+const app = createApi<WorkerEnv>(
   async (req, env) => {
     if (!(await authorize(req, env))) fail(401, "Access login required.");
-    return repositoryFor(env) ?? fail(503, "Document repository not configured.");
+    if (!configured(env)) fail(503, "Document repository not configured.");
+    return notebookFor(env);
   },
   { report: (report) => console.info(JSON.stringify(report)) },
 );
@@ -27,10 +19,10 @@ const app = createApi<Env>(
 /**
  * Cron-driven index warming. A push webhook cannot reach the Worker because the whole hostname
  * sits behind Cloudflare Access, so external Git edits are picked up on a schedule instead.
+ * It runs inside the notebook's Durable Object, sharing its adapter with HTTP requests.
  */
-async function scheduled(_controller: unknown, env: Env) {
+async function scheduled(_controller: unknown, env: WorkerEnv) {
   const started = performance.now();
-  const store = env.SEARCH_DB ? repositoryFor(env) : undefined;
   // Never log paths, titles, bodies, credentials or upstream exception messages.
   const log = (fields: Record<string, unknown>) =>
     console.info(
@@ -40,9 +32,9 @@ async function scheduled(_controller: unknown, env: Env) {
         timings: { total: performance.now() - started },
       }),
     );
-  if (!store) return log({ status: "skipped" });
+  if (!env.SEARCH_DB || !env.NOTEBOOK || !configured(env)) return log({ status: "skipped" });
   try {
-    log({ status: "ok", ...(await store.warm()) });
+    log({ status: "ok", ...(await (await notebookFor(env)).warm()) });
   } catch (error) {
     log({ status: "error", httpStatus: error instanceof HttpError ? error.status : 500 });
     throw error;

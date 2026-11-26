@@ -62,7 +62,7 @@ export type GitHubRepository = Repository & {
   warm(blobBudget?: number): Promise<WarmReport>;
 };
 
-/** One adapter per repository/credential/branch, retained by the Worker (never a public HTTP cache). */
+/** One adapter per repository/credential/branch, retained by the Notebook Durable Object (never a public HTTP cache). */
 export function github(env: Env, send: typeof fetch = fetch, now = Date.now): GitHubRepository {
   const { request, call } = githubHttp(env, send);
   const ref = encodeURIComponent(env.GITHUB_BRANCH || "main");
