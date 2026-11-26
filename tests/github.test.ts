@@ -138,7 +138,7 @@ test("concurrent cold lists coalesce tree and blob reads", async () => {
   assert.equal(f.calls.blob, 32);
 });
 
-test("save invalidates tree immediately and seeds the title and full-text caches", async () => {
+test("save invalidates tree immediately and seeds the title cache", async () => {
   const f = fixture(1);
   const before = await f.store.get(idOf(0));
   await f.store.list(0);
@@ -150,8 +150,6 @@ test("save invalidates tree immediately and seeds the title and full-text caches
   assert.deepEqual(after.items, [{ id: saved.id, title: "Renamed" }]);
   assert.equal(f.calls.tree, 2);
   assert.equal(f.calls.blob, 1);
-  assert.equal((await f.store.search("新しい検索語")).items[0]?.id, before.id);
-  assert.equal((await f.store.search("performance")).items.length, 0);
   await assert.rejects(f.store.save(before.id, "# stale", before.sha), { status: 409 });
   assert.equal((await f.store.get(before.id)).markdown, saved.markdown);
 });
@@ -209,16 +207,13 @@ test("failed blob loads can be retried and do not poison single-flight state", a
   assert.equal(f.calls.blob, 2);
 });
 
-test("warm tree revalidation observes external changes by SHA and invalidates search results", async () => {
+test("warm tree revalidation observes external changes by SHA", async () => {
   const f = fixture(1);
   await f.store.list(0);
-  assert.equal((await f.store.search("performance")).items.length, 1);
   f.externalEdit(idOf(0), "# 外部編集\nchanged");
   assert.equal((await f.store.list(0)).items[0].title, "Note 0"); // Bounded 15s external-edit staleness.
   f.advance();
   assert.equal((await f.store.list(0)).items[0].title, "外部編集");
-  assert.equal((await f.store.search("performance")).items.length, 0);
-  assert.equal((await f.store.search("changed")).items[0].title, "外部編集");
 });
 
 test("blob concurrency is bounded across different simultaneous pages", async () => {
@@ -251,21 +246,14 @@ test("a tree request started before a save cannot repopulate the invalidated sna
   assert.equal(trees, 2);
 });
 
-test("cold full-text scans stay within a per-request subrequest budget even beyond 50 documents", async () => {
+test("full-text search without a D1 index is unavailable instead of scanning GitHub", async () => {
   const f = fixture(130);
-  let cursor: number | null = 0;
-  let inspectedMatches = 0;
-  do {
-    const before = f.calls.tree + f.calls.blob + f.calls.metadata;
-    await f.store.privateOnly();
-    const page = await f.store.search("performance", cursor);
-    assert.ok(page.items.length <= 32);
-    assert.ok(f.calls.tree + f.calls.blob + f.calls.metadata - before <= 34); // Leaves room for JWKS.
-    inspectedMatches += page.items.length;
-    cursor = page.next;
-  } while (cursor !== null);
-  assert.equal(inspectedMatches, 130);
-  assert.ok(f.maxActive() <= 6);
+  await assert.rejects(f.store.search("performance"), {
+    status: 503,
+    message: "検索インデックスを利用できません。",
+  });
+  assert.deepEqual((await f.store.search("  ")).items, []);
+  assert.equal(f.calls.tree + f.calls.blob, 0);
 });
 
 test("repository privacy is cached briefly for reads, never on failure, and never for writes", async () => {
@@ -370,7 +358,6 @@ test("a branch without docs/ is an empty notebook, but a missing branch still fa
     return Response.json({ tree: [{ path: "assets", sha: shaOf(1), type: "tree" }] });
   });
   assert.deepEqual(await store.list(0), { items: [], next: null });
-  assert.deepEqual(await store.search("anything"), { items: [], next: null });
   assert.deepEqual(requested, [
     "/repos/u/notebook/git/trees/notes%2Fmain%3Adocs",
     "/repos/u/notebook/git/trees/notes%2Fmain",

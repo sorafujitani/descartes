@@ -1,13 +1,4 @@
-import {
-  uuid,
-  titleOf,
-  matchDocument,
-  rankResults,
-  searchTerms,
-  type Document,
-  type Page,
-  type SearchResult,
-} from "@descartes/shared";
+import { uuid, titleOf, searchTerms, type Document } from "@descartes/shared";
 import { fail, HttpError, type Repository } from "./repository.ts";
 import { SearchIndex, type SearchDatabase, type IndexEntry as Entry } from "./search-index.ts";
 export { fail, HttpError } from "./repository.ts";
@@ -95,8 +86,6 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Re
   }
   let contentBytes = 0;
   let tree: { entries: Entry[]; etag?: string; expires: number } | undefined;
-  const searchCache = new Map<string, { entries: Entry[]; results: Page<SearchResult> }>();
-  const searching = new Map<string, { entries: Entry[]; promise: Promise<Page<SearchResult>> }>();
   let treeLoading: { generation: number; promise: Promise<Entry[]> } | undefined;
   let generation = 0;
   let checkingPrivate: Promise<void> | undefined;
@@ -163,19 +152,24 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Re
     }
   }
   async function hydrate(page: Entry[]) {
-    return indexed(async (database) => {
-      const known = await database.titles(page.map((entry) => entry.sha));
-      for (const [sha, title] of known) rememberTitle(sha, title);
-      const missing = [
-        ...new Set(page.filter((entry) => !known.has(entry.sha)).map((entry) => entry.sha)),
-      ];
-      const blobs = await mapConcurrent(missing, async (sha) => ({
-        sha,
-        markdown: await blob(sha),
-      }));
-      await database.put(blobs);
-      return true;
-    });
+    const known = await indexed((database) => database.titles(page.map((entry) => entry.sha)));
+    if (!known) return false;
+    for (const [sha, title] of known) rememberTitle(sha, title);
+    const missing = [
+      ...new Set(page.filter((entry) => !known.has(entry.sha)).map((entry) => entry.sha)),
+    ];
+    // GitHub reads stay outside indexed() so a transient GitHub error is not mistaken for a D1
+    // outage, which would now disable search for the whole backoff window.
+    const blobs = await mapConcurrent(missing, async (sha) => ({
+      sha,
+      markdown: await blob(sha),
+    }));
+    return (
+      (await indexed(async (database) => {
+        await database.put(blobs);
+        return true;
+      })) ?? false
+    );
   }
   async function snapshot(): Promise<Entry[]> {
     if (tree && tree.expires > now()) return tree.entries;
@@ -211,7 +205,6 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Re
         }
       }
       if (version === generation) {
-        if (tree?.entries !== entries) searchCache.clear();
         tree = {
           entries,
           etag:
@@ -232,7 +225,6 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Re
   function invalidate() {
     generation++;
     tree = undefined;
-    searchCache.clear();
   }
   function write(path: string, bytes: Uint8Array, sha?: string): Promise<string> {
     // Contents API writes to the same branch must be serialized, even for different files.
@@ -312,47 +304,25 @@ export function github(env: Env, send: typeof fetch = fetch, now = Date.now): Re
     async search(query, cursor = 0) {
       const terms = searchTerms(query);
       if (!terms.length) return { items: [], next: null };
+      // Full-text search requires D1; scanning blobs instead is too slow and too expensive in
+      // subrequests to be a useful fallback, so an outage is reported rather than hidden.
+      const unavailable: () => never = () => fail(503, "検索インデックスを利用できません。");
+      if (!index || now() < indexRetryAt) unavailable();
       const entries = await snapshot();
+      const ready = await indexed((database) => database.searchComplete(entries, query));
+      if (ready) return { items: ready, next: null };
+      if (ready === undefined) unavailable();
+      // A cold index is hydrated one page per request to stay within the subrequest budget.
       const page = entries.slice(cursor, cursor + pageSize);
-      if (index && now() >= indexRetryAt) {
-        const ready = await indexed((database) => database.searchComplete(entries, query));
-        if (ready) return { items: ready, next: null };
-        if (ready === null && (await hydrate(page))) {
-          const last = cursor + page.length >= entries.length;
-          const complete = last
-            ? await indexed((database) => database.searchComplete(entries, query))
-            : null;
-          if (complete) return { items: complete, next: null };
-          const items = await indexed((database) => database.search(page, query));
-          if (items) return { items, next: last ? null : cursor + page.length };
-        }
+      if (!(await hydrate(page))) unavailable();
+      const last = cursor + page.length >= entries.length;
+      if (last) {
+        const complete = await indexed((database) => database.searchComplete(entries, query));
+        if (complete) return { items: complete, next: null };
       }
-      const key = JSON.stringify([terms, cursor]);
-      const cached = searchCache.get(key);
-      if (cached?.entries === entries) return cached.results;
-      const running = searching.get(key);
-      if (running?.entries === entries) return running.promise;
-      const promise = (async () => {
-        const matches = await mapConcurrent(page, async (f) => {
-          const markdown = await blob(f.sha);
-          return matchDocument(f.id, titles.get(f.sha) || f.id, markdown, terms);
-        });
-        const results = {
-          items: rankResults(matches.filter((match): match is SearchResult => match !== undefined)),
-          next: cursor + page.length < entries.length ? cursor + page.length : null,
-        };
-        if (tree?.entries === entries) {
-          if (searchCache.size >= 16) searchCache.delete(searchCache.keys().next().value!);
-          searchCache.set(key, { entries, results });
-        }
-        return results;
-      })();
-      searching.set(key, { entries, promise });
-      try {
-        return await promise;
-      } finally {
-        if (searching.get(key)?.promise === promise) searching.delete(key);
-      }
+      const items = await indexed((database) => database.search(page, query));
+      if (!items) unavailable();
+      return { items, next: last ? null : cursor + page.length };
     },
     async get(id): Promise<Document> {
       // The tree SHA may be up to TREE_TTL old; saves stay safe because GitHub rejects stale SHAs.
