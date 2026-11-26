@@ -45,7 +45,7 @@ import {
   redo,
   undo,
 } from "@codemirror/commands";
-import { deleteMarkupBackward, markdown, markdownLanguage } from "@codemirror/lang-markdown";
+import { deleteMarkupBackward, markdownLanguage } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting, syntaxTree } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 
@@ -840,13 +840,10 @@ export const NoteView = forwardRef<
             { key: "Mod-Alt-[", run: (view) => runCommand(view, "heading-prev") },
             { key: "Mod-Alt-]", run: (view) => runCommand(view, "heading-next") },
           ]),
-          markdown({
-            base: markdownLanguage,
-            addKeymap: false,
-            completeHTMLTags: false,
-            // Our pasteLink (shared with the Mac app) puts the caret after the link instead.
-            pasteURLAsLink: false,
-          }),
+          // The bare GFM language, not markdown(): that always bundles HTML, CSS and JavaScript
+          // parsers (about a fifth of the app) for inline HTML, which this editor never styles.
+          // Its keymap, HTML completion and URL paste are replaced by our own commands anyway.
+          markdownLanguage,
           keymap.of([...historyKeymap, ...defaultKeymap]),
           syntaxHighlighting(proseHighlight),
           live.current.of(raw ? [] : liveExtensions),
