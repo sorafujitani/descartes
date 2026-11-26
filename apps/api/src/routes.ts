@@ -70,7 +70,13 @@ export function createApi<Bindings extends object>(
     // Reads overlap the privacy round trip, but no response leaves before it succeeds.
     privacy.catch(() => {});
     await next();
-    await privacy;
+    await privacy.catch((error: unknown) => {
+      // Hono merges an existing response's headers into the error response, so a long-lived
+      // image Cache-Control would otherwise make the failure itself cacheable.
+      void c.res.body?.cancel().catch(() => {});
+      c.res = undefined;
+      throw error;
+    });
   });
   app.get("/api/docs", async (c) => {
     const cursor = cursorOf(c.req.query("cursor"));
@@ -149,7 +155,8 @@ export function createApi<Bindings extends object>(
     return new Response(r.body, {
       headers: {
         "Content-Type": image[1] === "jpg" ? "image/jpeg" : "image/" + image[1],
-        "Cache-Control": "private, no-store",
+        // Upload always mints a new UUID name, so a name's bytes never change; private keeps shared caches out.
+        "Cache-Control": "private, max-age=31536000, immutable",
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "default-src 'none'",
       },

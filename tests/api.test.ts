@@ -8,6 +8,7 @@ import worker from "../apps/api/src/index.ts";
 import { route } from "./support.ts";
 import { github, type Env } from "../apps/api/src/github.ts";
 import { memoryStore } from "../apps/api/dev/demo.ts";
+import { fail } from "../apps/api/src/repository.ts";
 const env: Env = {
   GITHUB_REPOSITORY: "u/repo",
   GITHUB_BRANCH: "main",
@@ -50,7 +51,21 @@ test("private screenshot round trip and input boundaries", async () => {
   const uploaded = await (await route(req("assets", "POST", png), store)).json();
   const image = await route(req(uploaded.path.slice(3)), store);
   assert.equal(image.headers.get("Content-Type"), "image/png");
-  assert.match(image.headers.get("Cache-Control")!, /no-store/);
+  assert.equal(image.headers.get("Cache-Control"), "private, max-age=31536000, immutable");
+  assert.equal(image.headers.get("X-Content-Type-Options"), "nosniff");
+  assert.equal(image.headers.get("Content-Security-Policy"), "default-src 'none'");
+  const missing = await route(req("assets/" + crypto.randomUUID() + ".png"), store);
+  assert.equal(missing.status, 404);
+  assert.equal(missing.headers.get("Cache-Control"), "private, no-store");
+  const invalid = await route(req("assets/x.svg"), store);
+  assert.equal(invalid.status, 404);
+  assert.equal(invalid.headers.get("Cache-Control"), "private, no-store");
+  const publicRepo = await route(req(uploaded.path.slice(3)), {
+    ...store,
+    privateOnly: async () => fail(403, "Repository is not private."),
+  });
+  assert.equal(publicRepo.status, 403);
+  assert.equal(publicRepo.headers.get("Cache-Control"), "private, no-store");
   assert.deepEqual(new Uint8Array(await image.arrayBuffer()), png);
   assert.equal((await route(req("assets", "POST", "<svg/>"), store)).status, 415);
   assert.equal(
