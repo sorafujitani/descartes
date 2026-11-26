@@ -2,7 +2,7 @@ import { test, vi } from "vite-plus/test";
 import assert from "node:assert/strict";
 import { github, type Env } from "../apps/api/src/github.ts";
 import { client } from "../packages/shared/src/index.ts";
-import { route } from "./support.ts";
+import { answerGraphql, blobLookups, route } from "./support.ts";
 import { SqliteD1 } from "./sqlite.ts";
 
 const idOf = (n: number) => `00000000-0000-0000-0000-${n.toString(16).padStart(12, "0")}`;
@@ -24,7 +24,8 @@ function fixture(db: SqliteD1, count = 65) {
       { sha: shaOf(n + 1), markdown: `# Note ${n}\nbody needle 検索 ${n}` },
     ]),
   );
-  const counts = { metadata: 0, tree: 0, blobs: 0, writes: 0, contents: 0 };
+  // `blobs`: blobs read (GraphQL lookups and REST); `graphql`: batched GraphQL requests.
+  const counts = { metadata: 0, tree: 0, blobs: 0, graphql: 0, writes: 0, contents: 0 };
   const send: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
     if (url.pathname.endsWith("index-fixture")) {
@@ -34,8 +35,21 @@ function fixture(db: SqliteD1, count = 65) {
     if (url.pathname.includes("/git/trees/")) {
       counts.tree++;
       return Response.json({
-        tree: [...docs].map(([id, doc]) => ({ path: `${id}.md`, sha: doc.sha, type: "blob" })),
+        tree: [...docs].map(([id, doc]) => ({
+          path: `${id}.md`,
+          sha: doc.sha,
+          type: "blob",
+          size: Buffer.byteLength(doc.markdown),
+        })),
       });
+    }
+    if (url.pathname === "/graphql") {
+      counts.graphql++;
+      counts.blobs += blobLookups(init).length;
+      return answerGraphql(
+        init,
+        (sha) => [...docs.values()].find((doc) => doc.sha === sha)?.markdown ?? null,
+      );
     }
     if (url.pathname.includes("/git/blobs/")) {
       counts.blobs++;
@@ -93,7 +107,9 @@ test("persistent index survives adapter restarts and completes fully indexed sea
     const coldMs = performance.now() - started;
     assert.equal(first.items.length, 50);
     assert.equal(f.counts.blobs, 65);
-    assert.equal(coldPages, 5);
+    assert.equal(f.counts.graphql, 1);
+    assert.equal(coldPages, 1);
+    const coldGithub = f.counts.metadata + f.counts.tree + f.counts.graphql;
     const beforeBlobs = f.counts.blobs;
     let persistedPages = 0;
     const roundTrips = db.roundTrips;
@@ -114,7 +130,12 @@ test("persistent index survives adapter restarts and completes fully indexed sea
       console.info(
         JSON.stringify({
           fixture: "65 synthetic documents, local SQLite (not production)",
-          cold: { httpRequests: coldPages, githubBlobs: beforeBlobs, elapsedMs: coldMs },
+          cold: {
+            httpRequests: coldPages,
+            githubRequests: coldGithub,
+            githubBlobs: beforeBlobs,
+            elapsedMs: coldMs,
+          },
           persistedColdWorker: {
             httpRequests: persistedPages,
             githubBlobs: f.counts.blobs - beforeBlobs,
@@ -224,11 +245,12 @@ test("cold indexed search hydrates one bounded page of GitHub reads per request"
     let cursor: number | null = 0;
     let last;
     do {
-      const before = f.counts.tree + f.counts.blobs + f.counts.metadata;
+      const github = () => f.counts.tree + f.counts.graphql + f.counts.metadata;
+      const before = github();
       await store.privateOnly();
       const page = await store.search("needle", cursor);
       // Leaves room for Access JWKS and D1 writes within Workers Free's 50 subrequests.
-      assert.ok(f.counts.tree + f.counts.blobs + f.counts.metadata - before <= 18);
+      assert.ok(github() - before <= 18);
       last = page;
       cursor = page.next;
     } while (cursor !== null);
@@ -358,6 +380,59 @@ test("an oversized document is skipped without stalling the warm batch it belong
     // The index stayed available, and only counts were logged.
     assert.doesNotMatch(JSON.stringify(warning.mock.calls), /search_index_unavailable|Huge|secret/);
     assert.equal(warning.mock.calls.length, 3);
+  } finally {
+    warning.mockRestore();
+    db.close();
+  }
+});
+
+test("cold indexing of large documents keeps GitHub and D1 calls within the subrequest budget", async () => {
+  const db = new SqliteD1();
+  try {
+    const f = fixture(db, 30);
+    for (const [id, doc] of f.docs) doc.markdown += "\n" + "本文".repeat(30_000) + id;
+    const store = f.fresh();
+    let cursor: number | null = 0;
+    let pages = 0;
+    do {
+      const github = () => f.counts.metadata + f.counts.tree + f.counts.graphql;
+      const before = github() + db.roundTrips;
+      const response = await route(
+        new Request("https://app.test/api/search?q=needle&cursor=" + cursor),
+        store,
+      );
+      // 50 minus Access JWKS, which the adapter never sees.
+      assert.ok(github() + db.roundTrips - before <= 49);
+      cursor = (await response.json()).next;
+      pages++;
+    } while (cursor !== null);
+    assert.equal(pages, 3); // PAGE_BYTES ends a page after about 2 MiB of documents.
+    assert.equal(f.counts.blobs, 30);
+    assert.equal(db.sqlite.prepare("SELECT count(*) AS count FROM search_blobs").get()!.count, 30);
+  } finally {
+    db.close();
+  }
+});
+
+test("a GitHub read failure during indexing returns 502 without disabling the index", async () => {
+  const db = new SqliteD1();
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    const f = fixture(db, 3);
+    let fail = true;
+    const store = github(f.env, async (input, init) => {
+      if (fail && new URL(String(input)).pathname === "/graphql") {
+        fail = false;
+        return Response.json({ errors: [{ message: "upstream-secret" }] });
+      }
+      return f.send(input, init);
+    });
+    const response = await route(new Request("https://app.test/api/search?q=needle"), store);
+    assert.equal(response.status, 502);
+    assert.doesNotMatch(await response.text(), /upstream-secret/);
+    assert.equal(warning.mock.calls.length, 0);
+    assert.equal((await apiFor(store).search("needle")).items.length, 3);
+    assert.equal(db.sqlite.prepare("SELECT count(*) AS count FROM search_blobs").get()!.count, 3);
   } finally {
     warning.mockRestore();
     db.close();

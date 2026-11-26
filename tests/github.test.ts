@@ -1,6 +1,8 @@
 import { test } from "vite-plus/test";
 import assert from "node:assert/strict";
 import { github, type Env } from "../apps/api/src/github.ts";
+import { answerGraphql, blobLookups, route } from "./support.ts";
+import { SqliteD1 } from "./sqlite.ts";
 
 const env: Env = {
   GITHUB_REPOSITORY: "u/notebook",
@@ -11,22 +13,62 @@ const env: Env = {
 };
 const shaOf = (n: number) => n.toString(16).padStart(40, "0");
 const idOf = (n: number) => `00000000-0000-0000-0000-${n.toString(16).padStart(12, "0")}`;
-function fixture(count: number) {
+type Doc = { sha: string; markdown: string; size?: number; graphql?: "binary" | "truncated" };
+function fixture(
+  count: number,
+  docOf: (i: number) => Partial<Doc> = () => ({}),
+  extra: Partial<Env> = {},
+) {
   let clock = 0,
     revision = 0,
     active = 0,
     maxActive = 0;
-  let failBlob = false;
-  const calls = { tree: 0, blob: 0, write: 0, metadata: 0, conditional: 0, contents: 0 };
-  const docs = new Map(
+  let failGraphql: (() => Response) | undefined;
+  // `blob`: REST blob reads; `lookups`: blobs requested through GraphQL.
+  const calls = {
+    contents: 0,
+    tree: 0,
+    blob: 0,
+    graphql: 0,
+    lookups: 0,
+    write: 0,
+    metadata: 0,
+    conditional: 0,
+  };
+  const docs = new Map<string, Doc>(
     Array.from({ length: count }, (_, i) => [
       idOf(i),
-      { sha: shaOf(i + 1), markdown: `# Note ${i}\n本文 ${i} performance` },
+      { sha: shaOf(i + 1), markdown: `# Note ${i}\n本文 ${i} performance`, ...docOf(i) },
     ]),
   );
+  const bySha = (sha: string) => [...docs.values()].find((doc) => doc.sha === sha);
+  const githubRequests = () => calls.metadata + calls.tree + calls.blob + calls.graphql;
   const send: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
     assert.equal(init?.redirect, "manual");
+    if (url.pathname === "/graphql") {
+      calls.graphql++;
+      assert.equal(init?.method, "POST");
+      if (failGraphql) {
+        const response = failGraphql();
+        failGraphql = undefined;
+        return response;
+      }
+      calls.lookups += blobLookups(init).length;
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await Promise.resolve();
+      active--;
+      return answerGraphql(init, (sha) => {
+        const doc = bySha(sha);
+        if (!doc) return null;
+        assert.ok((doc.size ?? 0) <= 256 * 1024, "oversized blobs must not be read via GraphQL");
+        if (doc.graphql === "binary") return { text: null, isBinary: true, isTruncated: false };
+        if (doc.graphql === "truncated")
+          return { text: doc.markdown.slice(0, 3), isBinary: false, isTruncated: true };
+        return doc.markdown;
+      });
+    }
     if (url.pathname.endsWith("/notebook")) {
       calls.metadata++;
       return Response.json({ private: true });
@@ -44,6 +86,7 @@ function fixture(count: number) {
             path: `${id}.md`,
             type: "blob",
             sha: doc.sha,
+            size: doc.size,
           })),
         },
         { headers: { ETag: etag } },
@@ -51,16 +94,12 @@ function fixture(count: number) {
     }
     if (url.pathname.includes("/git/blobs/")) {
       calls.blob++;
-      if (failBlob) {
-        failBlob = false;
-        return new Response(null, { status: 503 });
-      }
       active++;
       maxActive = Math.max(maxActive, active);
       await Promise.resolve();
       active--;
       const sha = url.pathname.split("/").at(-1);
-      const doc = [...docs.values()].find((doc) => doc.sha === sha)!;
+      const doc = bySha(sha!)!;
       return Response.json({
         content: Buffer.from(doc.markdown).toString("base64"),
         encoding: "base64",
@@ -86,15 +125,17 @@ function fixture(count: number) {
     });
   };
   return {
-    store: github(env, send, () => clock),
+    store: github({ ...env, ...extra }, send, () => clock),
     calls,
     docs,
+    send,
+    githubRequests,
     maxActive: () => maxActive,
     advance: () => {
       clock += 15_001;
     },
-    failNextBlob: () => {
-      failBlob = true;
+    failNextGraphql: (response = () => new Response(null, { status: 503 })) => {
+      failGraphql = response;
     },
     externalEdit: (id: string, markdown: string) => {
       docs.set(id, { sha: shaOf(20_000 + ++revision), markdown });
@@ -102,32 +143,42 @@ function fixture(count: number) {
   };
 }
 
-test("32-item pages share one tree and immutable blobs, with bounded concurrency", async () => {
+test("a cold list reads the whole notebook through a few batched GraphQL requests", async () => {
   const f = fixture(130);
   const first = await f.store.list(0);
-  assert.equal(first.items.length, 32);
-  assert.equal(first.next, 32);
-  let page = first;
-  let total = page.items.length;
-  while (page.next !== null) {
-    page = await f.store.list(page.next);
-    total += page.items.length;
-  }
-  assert.equal(page.items.length, 2);
-  assert.equal(total, 130);
+  assert.equal(first.items.length, 130);
+  assert.equal(first.next, null);
+  assert.equal(first.items[129].title, "Note 129");
   assert.equal(f.calls.tree, 1);
-  assert.equal(f.calls.blob, 130);
-  assert.ok(f.maxActive() <= 6);
-  // Every title is now known, so the whole list is a single page without GitHub reads.
+  assert.equal(f.calls.graphql, 2); // 100 + 30 aliased lookups.
+  assert.equal(f.calls.lookups, 130);
+  assert.equal(f.calls.blob, 0);
+  // Every title is now known, so the list costs no blob read.
   const warm = await f.store.list(0);
-  assert.equal(warm.items.length, 130);
-  assert.equal(warm.next, null);
-  assert.equal(f.calls.blob, 130);
+  assert.deepEqual(warm, first);
+  assert.equal(f.calls.graphql, 2);
   f.advance();
   await f.store.list(0);
   assert.equal(f.calls.tree, 2);
   assert.equal(f.calls.conditional, 1);
-  assert.equal(f.calls.blob, 130);
+  assert.equal(f.calls.graphql, 2);
+});
+
+test("very large notebooks are paged by document count with few subrequests per page", async () => {
+  const f = fixture(1201);
+  let cursor: number | null = 0;
+  const sizes: number[] = [];
+  do {
+    const before = f.githubRequests();
+    await f.store.privateOnly();
+    const page = await f.store.list(cursor);
+    sizes.push(page.items.length);
+    assert.ok(f.githubRequests() - before <= 7);
+    cursor = page.next;
+  } while (cursor !== null);
+  assert.deepEqual(sizes, [500, 500, 201]);
+  assert.equal(f.calls.lookups, 1201);
+  assert.equal(f.calls.graphql, 13);
 });
 
 test("concurrent cold lists coalesce tree and blob reads", async () => {
@@ -135,7 +186,8 @@ test("concurrent cold lists coalesce tree and blob reads", async () => {
   const pages = await Promise.all([f.store.list(0), f.store.list(0), f.store.list(0)]);
   assert.deepEqual(pages[0], pages[2]);
   assert.equal(f.calls.tree, 1);
-  assert.equal(f.calls.blob, 32);
+  assert.equal(f.calls.graphql, 1);
+  assert.equal(f.calls.lookups, 32);
 });
 
 test("save invalidates tree immediately and seeds the title cache", async () => {
@@ -166,9 +218,10 @@ test("opening a listed document reuses the tree SHA and cached body without the 
   });
   assert.equal(f.calls.contents, 0);
   assert.equal(f.calls.tree, 1);
-  assert.equal(f.calls.blob, 2);
+  assert.equal(f.calls.blob, 0);
+  assert.equal(f.calls.graphql, 1);
   await f.store.get(idOf(1));
-  assert.equal(f.calls.contents + f.calls.tree + f.calls.blob, 3);
+  assert.equal(f.calls.contents + f.calls.tree + f.calls.blob + f.calls.graphql, 2);
 });
 
 test("an id missing from the snapshot falls back to the Contents API and keeps 404", async () => {
@@ -199,12 +252,61 @@ test("external edits become readable after the tree TTL and stale SHAs still con
   assert.equal(f.calls.contents, 0);
 });
 
-test("failed blob loads can be retried and do not poison single-flight state", async () => {
+test("failed GraphQL reads can be retried and do not poison single-flight state", async () => {
   const f = fixture(1);
-  f.failNextBlob();
+  f.failNextGraphql();
   await assert.rejects(f.store.list(0), { status: 502 });
   assert.equal((await f.store.list(0)).items.length, 1);
-  assert.equal(f.calls.blob, 2);
+  assert.equal(f.calls.graphql, 2);
+});
+
+test("GraphQL errors fail the request with a generic 502 and never leak upstream messages", async () => {
+  const failures = [
+    () => Response.json({ errors: [{ message: "upstream-secret rate limit exceeded" }] }),
+    () =>
+      Response.json({ data: null, errors: [{ type: "NOT_FOUND", message: "upstream-secret" }] }),
+    () => Response.json({ message: "upstream-secret secondary rate limit" }, { status: 403 }),
+    () => Response.json({ data: { repository: null } }),
+    () => new Response("upstream-secret <html>", { status: 200 }),
+  ];
+  for (const failure of failures) {
+    const f = fixture(3);
+    f.failNextGraphql(failure);
+    const response = await route(new Request("https://app.test/api/docs"), f.store);
+    assert.equal(response.status, 502);
+    assert.doesNotMatch(await response.text(), /upstream-secret/);
+    assert.equal(f.calls.blob, 0); // No REST storm after a failed batch.
+    assert.equal((await f.store.list(0)).items[2].title, "Note 2");
+  }
+});
+
+test("binary, truncated and oversized blobs fall back to the REST blob endpoint", async () => {
+  const big = "# Big\n" + "x".repeat(300 * 1024);
+  const f = fixture(6, (i) =>
+    i === 1
+      ? { graphql: "binary" }
+      : i === 2
+        ? { graphql: "truncated" }
+        : i === 3
+          ? { markdown: big, size: big.length }
+          : i === 4
+            ? { markdown: "\uFEFF# BOM title\nbody" }
+            : {},
+  );
+  const page = await f.store.list(0);
+  assert.deepEqual(
+    page.items.map((item) => item.title),
+    ["Note 0", "Note 1", "Note 2", "Big", "BOM title", "Note 5"],
+  );
+  assert.equal(f.calls.graphql, 1);
+  assert.equal(f.calls.lookups, 5); // The oversized blob is never requested through GraphQL.
+  assert.equal(f.calls.blob, 3);
+  // Known fallbacks go straight to REST after the tree changes.
+  f.externalEdit(idOf(5), "# Changed");
+  f.advance();
+  await f.store.list(0);
+  assert.equal(f.calls.blob, 3);
+  assert.equal(f.calls.lookups, 6);
 });
 
 test("warm tree revalidation observes external changes by SHA", async () => {
@@ -216,10 +318,11 @@ test("warm tree revalidation observes external changes by SHA", async () => {
   assert.equal((await f.store.list(0)).items[0].title, "外部編集");
 });
 
-test("blob concurrency is bounded across different simultaneous pages", async () => {
-  const f = fixture(130);
+test("simultaneous pages read each SHA once with bounded concurrency", async () => {
+  const f = fixture(130, (i) => (i % 3 ? {} : { graphql: "binary" }));
   await Promise.all([0, 32, 64, 96, 128].map((cursor) => f.store.list(cursor)));
-  assert.equal(f.calls.blob, 130);
+  assert.equal(f.calls.lookups, 130);
+  assert.equal(f.calls.blob, 44);
   assert.ok(f.maxActive() <= 6);
 });
 
@@ -231,6 +334,7 @@ test("a tree request started before a save cannot repopulate the invalidated sna
   let trees = 0;
   const store = github(env, async (input, init) => {
     if (init?.method === "PUT") return Response.json({ content: { sha: shaOf(2) } });
+    if (String(input).endsWith("/graphql")) return answerGraphql(init, () => "# Old");
     if (String(input).includes("/git/trees/")) {
       if (++trees === 1) return old;
       return Response.json({ tree: [{ path: `${idOf(1)}.md`, sha: shaOf(2), type: "blob" }] });
@@ -254,6 +358,46 @@ test("full-text search without a D1 index is unavailable instead of scanning Git
   });
   assert.deepEqual((await f.store.search("  ")).items, []);
   assert.equal(f.calls.tree + f.calls.blob, 0);
+});
+
+test("cold indexed search stays within a per-request subrequest budget with many REST fallbacks", async () => {
+  const db = new SqliteD1();
+  try {
+    // Every tenth blob needs a REST fallback, which ends pages at the budget instead of PAGE_DOCS.
+    const f = fixture(
+      1200,
+      (i) => ({
+        graphql: i % 10 === 5 ? "binary" : undefined,
+        markdown: `# Note ${i}\nterm-${i} performance`,
+      }),
+      { SEARCH_DB: db },
+    );
+    let cursor: number | null = 0;
+    let pages = 0;
+    let last;
+    do {
+      const before = f.githubRequests() + db.roundTrips;
+      await f.store.privateOnly();
+      const page = await f.store.search("term-1195", cursor);
+      // 50 minus Access JWKS, which the adapter never sees; D1 index writes share the budget.
+      assert.ok(f.githubRequests() + db.roundTrips - before <= 49);
+      assert.ok(page.next === null || page.next > (cursor ?? 0));
+      last = page;
+      cursor = page.next;
+      pages++;
+    } while (cursor !== null);
+    // The final page completed the index, so it is the global result.
+    assert.deepEqual(
+      last.items.map((item) => item.title),
+      ["Note 1195"],
+    );
+    // Each fallback also reserves a whole D1 write batch, so pages are smaller than without D1.
+    assert.ok(pages <= 6);
+    assert.equal(f.calls.blob, 120);
+    assert.ok(f.maxActive() <= 6);
+  } finally {
+    db.close();
+  }
 });
 
 test("repository privacy is cached briefly for reads, never on failure, and never for writes", async () => {
@@ -324,8 +468,9 @@ test("branch writes are serialized and a failed write does not stop the queue", 
 
 test("only the docs subtree is listed, so assets and other entries are never returned", async () => {
   const requested: string[] = [];
-  const store = github(env, async (input) => {
+  const store = github(env, async (input, init) => {
     const url = new URL(String(input));
+    if (url.pathname === "/graphql") return answerGraphql(init, () => "# Title");
     if (url.pathname.includes("/git/trees/")) {
       requested.push(url.pathname + url.search);
       return Response.json({

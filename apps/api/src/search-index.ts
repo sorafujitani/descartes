@@ -13,6 +13,21 @@ export interface SearchDatabase {
 }
 export type IndexEntry = { id: string; sha: string };
 export type IndexBlob = { sha: string; markdown: string };
+export type IndexRow = IndexBlob & { title: string; text: string; size: number };
+/** `put` flushes a D1 batch before it would exceed this many bytes. */
+export const INDEX_BATCH_BYTES = 2 * 1024 * 1024;
+/** Precomputed so callers can count D1 batches before writing without normalizing twice. */
+export function indexRow({ sha, markdown }: IndexBlob): IndexRow {
+  const title = titleOf(markdown).slice(0, 512);
+  const text = normalizeSearch(markdown);
+  const size =
+    new TextEncoder().encode(markdown).length +
+    new TextEncoder().encode(text).length +
+    title.length * 4 +
+    256;
+  return { sha, markdown, title, text, size };
+}
+const isRow = (blob: IndexBlob | IndexRow): blob is IndexRow => "size" in blob;
 const entriesJson = (entries: IndexEntry[]) =>
   JSON.stringify(entries.map(({ id, sha }) => [id, sha]));
 /** Rows describing the current tree, exposed as `e(id, sha)`. */
@@ -182,28 +197,22 @@ export class SearchIndex {
     ]);
   }
   /** Stores `blobs`, skipping documents too large for one row; returns how many were skipped. */
-  async put(blobs: IndexBlob[]) {
+  async put(blobs: (IndexBlob | IndexRow)[]) {
     const scope = await this.scope;
     let oversized = 0;
     const sql = `INSERT INTO search_blobs(scope, sha, title, normalized_title, markdown, search_text)
       VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(scope, sha) DO NOTHING`;
     let batch: SearchStatement[] = [];
     let bytes = 0;
-    for (const { sha, markdown } of blobs) {
-      const title = titleOf(markdown).slice(0, 512);
-      const text = normalizeSearch(markdown);
-      const size =
-        new TextEncoder().encode(markdown).length +
-        new TextEncoder().encode(text).length +
-        title.length * 4 +
-        256;
+    for (const blob of blobs) {
+      const { sha, markdown, title, text, size } = isRow(blob) ? blob : indexRow(blob);
       // Bound batch payloads. An oversized document stays unindexed instead of failing the batch,
       // which would otherwise block every other document in it on each retry.
-      if (size > 2 * 1024 * 1024) {
+      if (size > INDEX_BATCH_BYTES) {
         oversized++;
         continue;
       }
-      if (bytes + size > 2 * 1024 * 1024 && batch.length) {
+      if (bytes + size > INDEX_BATCH_BYTES && batch.length) {
         await this.db.batch(batch);
         batch = [];
         bytes = 0;
