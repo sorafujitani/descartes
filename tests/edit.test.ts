@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
 import {
+  caretBelowTitle,
   linkAt,
   moveLines,
   pasteLink,
@@ -251,4 +252,14 @@ test("lines move up and down with the selection; ordered lists renumber on Retur
   const list = "1. a\n2. b\n   - nested\n3. c\n\n1. other";
   assert.equal(continueList(list, 4)?.text, "1. a\n2. \n3. b\n   - nested\n4. c\n\n1. other");
   assert.equal(continueList("1) a\n2. b", 4)?.text, "1) a\n2) \n2. b", "other delimiter");
+});
+
+test("an opened note's caret starts on the line below its title", () => {
+  assert.equal(caretBelowTitle("# daily\n\ntask"), 8);
+  assert.equal(caretBelowTitle("# 日本語\n本文"), 6);
+  // A title-only note keeps the caret at the end of the title; a new note after "# ".
+  assert.equal(caretBelowTitle("# daily"), 7);
+  assert.equal(caretBelowTitle("# "), 2);
+  assert.equal(caretBelowTitle("no title\nbody"), 0);
+  assert.equal(caretBelowTitle(""), 0);
 });

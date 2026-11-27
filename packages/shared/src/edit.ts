@@ -688,3 +688,10 @@ export function findMatch(
   const wrapped = index >= 0 ? index : fallback;
   return wrapped < 0 ? null : { start: wrapped, end: wrapped + needle.length };
 }
+
+/** Where an opened note's caret starts: the start of the line below its `#` title. */
+export function caretBelowTitle(markdown: string) {
+  if (!/^#\s/.test(markdown)) return 0;
+  const end = markdown.indexOf("\n");
+  return end === -1 ? markdown.length : end + 1;
+}

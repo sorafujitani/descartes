@@ -153,7 +153,8 @@ private extension Result where Failure == Error {
     guard ready, let book else { return }
     if shownRevision != book.revision {
       shownRevision = book.revision
-      call("load", book.text, book.base == nil ? 2 : 0)
+      // The page puts the caret below the title (after "# " in a new note).
+      call("load", book.text)
     }
     let options: [String: AnyHashable] = [
       "readOnly": book.busy, "raw": book.source,

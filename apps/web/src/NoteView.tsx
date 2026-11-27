@@ -56,6 +56,16 @@ export const NoteView = forwardRef<
   change.current = onChange;
   /** The editor's text as last emitted or applied; echoing it back needs no comparison. */
   const synced = useRef(source);
+  /**
+   * A read-only (non-editable) editor cannot take focus, and the Mac app opens notes while it is
+   * still busy. Such a request is kept and honored once the editor becomes editable.
+   */
+  const pendingFocus = useRef(false);
+  const focusWhenEditable = () => {
+    const view = editor.current;
+    pendingFocus.current = Boolean(view?.state.readOnly);
+    if (view && !view.state.readOnly) view.focus();
+  };
   useImperativeHandle(
     ref,
     () => ({
@@ -71,7 +81,7 @@ export const NoteView = forwardRef<
         return state ? state.sliceDoc(0, state.selection.main.to).length : 0;
       },
       focus() {
-        editor.current?.focus();
+        focusWhenEditable();
       },
       setSelectionRange(start, end) {
         const view = editor.current;
@@ -250,6 +260,7 @@ export const NoteView = forwardRef<
         EditorView.editable.of(!readOnly),
       ]),
     });
+    if (!readOnly && pendingFocus.current) focusWhenEditable();
   }, [readOnly]);
   useLayoutEffect(() => {
     editor.current?.dispatch({ effects: live.current.reconfigure(raw ? [] : liveExtensions) });
@@ -279,7 +290,7 @@ export const NoteView = forwardRef<
     const view = editor.current;
     if (view && focusAt != null) {
       view.dispatch({ selection: { anchor: Math.min(focusAt, view.state.doc.length) } });
-      view.focus();
+      focusWhenEditable();
     }
   }, [focusAt]);
   return <article ref={root} className="note document-editor" aria-label="ノート" />;

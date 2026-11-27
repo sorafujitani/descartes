@@ -5,7 +5,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { findMatch } from "@descartes/shared";
+import { caretBelowTitle, findMatch } from "@descartes/shared";
 import { NoteView, type EditCommand, type NoteViewHandle } from "./NoteView";
 import "@sorafujitani/document-design-system/tokens.css";
 import "@sorafujitani/document-design-system/theme.css";
@@ -17,8 +17,11 @@ type Message =
   | { type: "change"; markdown: string; persist: boolean }
   | { type: "found"; found: boolean };
 export type EditorBridge = {
-  /** Shows another note (or a reloaded one): a fresh editor with its own undo history. */
-  load(markdown: string, caret: number): void;
+  /**
+   * Shows another note (or a reloaded one): a fresh editor with its own undo history. Without
+   * `caret`, the caret starts on the line below the title.
+   */
+  load(markdown: string, caret?: number): void;
   configure(options: { readOnly?: boolean; raw?: boolean; zoom?: number }): void;
   command(name: EditCommand): boolean;
   find(action: "show" | "next" | "previous"): void;
@@ -63,7 +66,11 @@ function EditorApp() {
   useEffect(() => {
     window.descartes = {
       load(markdown, caret) {
-        setNote((current) => ({ markdown, key: current.key + 1, caret }));
+        setNote((current) => ({
+          markdown,
+          key: current.key + 1,
+          caret: caret ?? caretBelowTitle(markdown),
+        }));
       },
       configure({ readOnly, raw, zoom }) {
         setOptions((current) => ({

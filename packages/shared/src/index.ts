@@ -11,6 +11,7 @@ export const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 export const imagePath = new RegExp("^\\.\\./assets/(" + uuid + "\\.(?:png|jpg|webp))$");
 export {
   breakBeforeHeading,
+  caretBelowTitle,
   closeFence,
   codeIndent,
   continueList,

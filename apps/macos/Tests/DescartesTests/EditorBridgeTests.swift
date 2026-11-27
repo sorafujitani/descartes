@@ -68,6 +68,35 @@ final class EditorBridgeTests: XCTestCase {
     XCTAssertEqual(background as? String, "rgba(0, 0, 0, 0)")
   }
 
+  @MainActor func testAnOpenedNoteStartsWithTheCaretBelowItsTitle() async throws {
+    try XCTSkipIf(EditorScheme.bundledRoot() == nil, "Run pnpm test:macos to build the editor.")
+    let editor = try await EditorHarness("# daily\n\ntask")
+    // Type without placing the caret first: the text lands on the empty line under the title.
+    _ = try await editor.js(
+      "window.descartes.focus(); document.execCommand('insertText', false, 'メモ')")
+    try await editor.until("typed below the title") { editor.book.text == "# daily\nメモ\ntask" }
+  }
+
+  @MainActor func testANoteOpenedWhileBusyGetsTheCaretOnceEditable() async throws {
+    try XCTSkipIf(EditorScheme.bundledRoot() == nil, "Run pnpm test:macos to build the editor.")
+    let editor = try await EditorHarness("# T")
+    // The notebook opens a note while it is still busy, so the page is read-only at first and
+    // cannot take focus; nobody asks for focus again when it becomes editable.
+    _ = try await editor.js(
+      "window.descartes.load('# daily\\n\\ntask'); window.descartes.configure({ readOnly: true })")
+    try await editor.until("the note is shown read-only") {
+      try await editor.js("document.querySelector('.cm-content').contentEditable") as? String
+        == "false"
+    }
+    _ = try await editor.js("window.descartes.configure({ readOnly: false })")
+    try await editor.until("editable") {
+      try await editor.js("document.querySelector('.cm-content').contentEditable") as? String
+        == "true"
+    }
+    _ = try await editor.js("document.execCommand('insertText', false, 'メモ')")
+    try await editor.until("typed below the title") { editor.book.text == "# daily\nメモ\ntask" }
+  }
+
   @MainActor func testTypingAndMenuCommandsReachTheNotebook() async throws {
     try XCTSkipIf(EditorScheme.bundledRoot() == nil, "Run pnpm test:macos to build the editor.")
     let editor = try await EditorHarness("# T\n- [ ] 牛乳\n- [ ] 卵")
