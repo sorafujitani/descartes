@@ -103,7 +103,7 @@ input[type="search"] {
   zoom: var(--note-zoom, 1);
 }
 
-/* Nesting buttons in a slim full-width bar on top of the on-screen keyboard: touch only, while editing. */
+/* Nesting buttons in a slim full-width bar docked on top of the on-screen keyboard: touch only, while editing. */
 .edit-toolbar {
   position: fixed;
   left: 0;
@@ -113,9 +113,24 @@ input[type="search"] {
   display: none;
   gap: 0.25rem;
   padding: 0.2rem max(0.5rem, env(safe-area-inset-left));
-  background: color-mix(in srgb, var(--color-code-bg) 94%, transparent);
-  backdrop-filter: blur(12px);
-  border-top: 1px solid var(--color-border);
+  background: var(--color-code-bg);
+  border-top: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent);
+  transition: opacity 120ms;
+}
+/* iOS draws its floating ^ v ✓ row over the page below the visible viewport; fill that gap so the
+   bar reads as part of the keyboard instead of floating above note text. */
+.edit-toolbar::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 40vh;
+  background: var(--color-code-bg);
+}
+.edit-toolbar[data-moving] {
+  opacity: 0;
+  transition: none;
 }
 .edit-toolbar .icon {
   display: grid;

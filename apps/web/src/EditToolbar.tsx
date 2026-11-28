@@ -22,31 +22,47 @@ export function EditToolbar({
   useEffect(() => {
     // `position: fixed` ignores the on-screen keyboard; follow the visible viewport instead.
     const viewport = window.visualViewport;
-    if (!viewport) return;
-    const place = () => {
-      const covered = window.innerHeight - viewport.height - viewport.offsetTop;
-      bar.current?.style.setProperty("--keyboard-inset", `${Math.max(0, covered)}px`);
-    };
-    // iOS reports intermediate sizes while the keyboard slides in, and may not send a final
-    // event; keep measuring for the length of the animation after anything that moves it.
+    const element = bar.current;
+    if (!viewport || !element) return;
+    const covered = () =>
+      Math.max(0, Math.round(window.innerHeight - viewport.height - viewport.offsetTop));
+    // iOS moves the visible viewport while scrolling and while the keyboard slides in, and
+    // reports it a frame late, so a bar that follows it shakes. Hide it while the viewport moves
+    // and show it again once the position has been stable for a moment.
     let frame = 0;
-    let until = 0;
-    const follow = () => {
-      place();
-      frame = performance.now() < until ? requestAnimationFrame(follow) : 0;
+    let lastEvent = 0;
+    let stableSince = 0;
+    let value = -1;
+    const tick = () => {
+      const now = performance.now();
+      const next = covered();
+      if (next !== value) {
+        value = next;
+        stableSince = now;
+        element.style.setProperty("--keyboard-inset", `${next}px`);
+      }
+      if (now - lastEvent > 200 && now - stableSince > 200) {
+        element.removeAttribute("data-moving");
+        frame = 0;
+        return;
+      }
+      frame = requestAnimationFrame(tick);
     };
     const settle = () => {
-      until = performance.now() + 800;
-      if (!frame) frame = requestAnimationFrame(follow);
+      lastEvent = performance.now();
+      element.setAttribute("data-moving", "");
+      if (!frame) frame = requestAnimationFrame(tick);
     };
-    place();
+    settle();
     viewport.addEventListener("resize", settle);
     viewport.addEventListener("scroll", settle);
+    window.addEventListener("scroll", settle, { passive: true });
     document.addEventListener("focusin", settle);
     return () => {
       cancelAnimationFrame(frame);
       viewport.removeEventListener("resize", settle);
       viewport.removeEventListener("scroll", settle);
+      window.removeEventListener("scroll", settle);
       document.removeEventListener("focusin", settle);
     };
   }, []);
