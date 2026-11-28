@@ -41,6 +41,8 @@ export type EditCommand =
   | "heading-next"
   | "move-up"
   | "move-down"
+  | "indent"
+  | "outdent"
   | "undo"
   | "redo";
 /** Marks an edit that should be saved at once, like a checkbox click. */
@@ -124,6 +126,10 @@ export function runCommand(view: EditorView, name: EditCommand): boolean {
     case "move-up":
     case "move-down":
       return moveSelectedLines(view, name === "move-up");
+    case "indent":
+    case "outdent":
+      // Same rule as Tab / ⇧Tab on a list item; elsewhere there is nothing to nest.
+      return sharedCommand((text, caret) => indentItem(text, caret, name === "outdent"))(view);
     case "link":
       applyEdit(view, previous, insertLink(previous, span), "input");
       return true;

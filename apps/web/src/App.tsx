@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { NotePalette, recentNotes, rememberNote } from "./NotePalette";
 import { NoteView, type NoteViewHandle } from "./NoteView";
+import { EditToolbar } from "./EditToolbar";
 import { useAutosave, blank } from "./useAutosave";
 import { useDocuments } from "./useDocuments";
 import { usePrefetch } from "./usePrefetch";
@@ -295,6 +296,7 @@ export function App({
           />
         </div>
       </main>
+      <EditToolbar editor={area} disabled={busy} />
       {error && (
         <div className="toast" role="alert">
           <span>{error}</span>

@@ -512,3 +512,32 @@ test("the highlighted note is read before it is chosen and opens without another
   assert.equal(editor().state.doc.toString(), other.markdown);
   assert.equal(reads.length, 1);
 });
+
+test("the touch toolbar nests and un-nests the list item at the caret and keeps the editor focused", async () => {
+  const note = { ...saved, markdown: "# Draft\n- a\n- b" };
+  const api = client("https://app.test", {}, async (url) =>
+    String(url).includes("?cursor=")
+      ? Response.json({ items: [], next: null })
+      : Response.json(note),
+  );
+  await mount(createElement(App, { api, initialId: note.id }));
+  await act(async () => {
+    const view = editor();
+    view.focus();
+    view.dispatch({ selection: { anchor: view.state.doc.length } });
+  });
+  const indent = button("インデント");
+  const down = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+  indent.dispatchEvent(down);
+  assert.equal(down.defaultPrevented, true);
+  await click("インデント");
+  assert.equal(editor().state.doc.toString(), "# Draft\n- a\n  - b");
+  await click("インデントを戻す");
+  assert.equal(editor().state.doc.toString(), "# Draft\n- a\n- b");
+  // Outside a list there is nothing to nest; the text is unchanged.
+  await act(async () => {
+    editor().dispatch({ selection: { anchor: 3 } });
+  });
+  await click("インデント");
+  assert.equal(editor().state.doc.toString(), "# Draft\n- a\n- b");
+});
