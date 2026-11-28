@@ -7,8 +7,9 @@ const actions: { command: EditCommand; label: string; path: string }[] = [
 ];
 
 /**
- * Touch keyboards have no Tab key, so list items get nesting buttons above the keyboard while the
- * note is being edited (CSS shows the bar only on touch devices with the editor focused).
+ * Touch keyboards have no Tab key, so list items get nesting buttons in a full-width bar directly
+ * above the keyboard (iOS's own ^ v ✓ row cannot be extended by a web page). CSS shows the bar
+ * only on touch devices with the editor focused.
  */
 export function EditToolbar({
   editor,
@@ -26,12 +27,27 @@ export function EditToolbar({
       const covered = window.innerHeight - viewport.height - viewport.offsetTop;
       bar.current?.style.setProperty("--keyboard-inset", `${Math.max(0, covered)}px`);
     };
+    // iOS reports intermediate sizes while the keyboard slides in, and may not send a final
+    // event; keep measuring for the length of the animation after anything that moves it.
+    let frame = 0;
+    let until = 0;
+    const follow = () => {
+      place();
+      frame = performance.now() < until ? requestAnimationFrame(follow) : 0;
+    };
+    const settle = () => {
+      until = performance.now() + 800;
+      if (!frame) frame = requestAnimationFrame(follow);
+    };
     place();
-    viewport.addEventListener("resize", place);
-    viewport.addEventListener("scroll", place);
+    viewport.addEventListener("resize", settle);
+    viewport.addEventListener("scroll", settle);
+    document.addEventListener("focusin", settle);
     return () => {
-      viewport.removeEventListener("resize", place);
-      viewport.removeEventListener("scroll", place);
+      cancelAnimationFrame(frame);
+      viewport.removeEventListener("resize", settle);
+      viewport.removeEventListener("scroll", settle);
+      document.removeEventListener("focusin", settle);
     };
   }, []);
   return (
